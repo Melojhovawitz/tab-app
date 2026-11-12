@@ -61,15 +61,26 @@ async function runModel(file) {
   return { frames, onsets, contours };
 }
 
+let baseNotes = null; // detected notes for the current sensitivity, reused by every other control
+let baseSens = null;
+
 function getNotes() {
   const s = Number($("sens").value);
+  if (!baseNotes || baseSens !== s) {
+    baseNotes = detectNotes(s);
+    baseSens = s;
+  }
+  return cleanNotes(baseNotes).map((n) => ({ ...n, pitchMidi: n.pitchMidi + transpose }));
+}
+
+function detectNotes(s) {
   const onset = 0.8 - 0.06 * s; // sensitivity 5 -> 0.5, 10 -> 0.2
   const frame = onset * 0.6;
   const events = outputToNotesPoly(raw.frames, raw.onsets, onset, frame, 5);
   const notes = noteFramesToTime(addPitchBendsToNoteEvents(raw.contours, events)).sort(
     (a, b) => a.startTimeSeconds - b.startTimeSeconds
   );
-  return cleanNotes(notes).map((n) => ({ ...n, pitchMidi: n.pitchMidi + transpose }));
+  return notes;
 }
 
 // Drops notes outside the instrument's range, optionally joins back-to-back repeats
@@ -300,6 +311,7 @@ function setStatus(text, isError = false) {
 async function handleFile(file) {
   if (!file) return;
   raw = null;
+  baseNotes = null;
   transpose = 0;
   currentName = file.name.replace(/\.[^.]+$/, "") || "song";
   $("controls").hidden = true;
@@ -341,8 +353,15 @@ drop.addEventListener("drop", (e) => {
   handleFile(e.dataTransfer.files[0]);
 });
 
+let renderTimer = 0;
+function scheduleRender(delay = 60) {
+  clearTimeout(renderTimer);
+  renderTimer = setTimeout(render, delay);
+}
+
 for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange"]) {
-  $(id).addEventListener("input", render);
+  // sensitivity re-detects every note, so wait until the slider stops moving
+  $(id).addEventListener("input", () => scheduleRender(id === "sens" ? 350 : 60));
 }
 
 function shift(by) {
@@ -356,9 +375,9 @@ $("midi").addEventListener("click", downloadMidi);
 
 $("lowNote").addEventListener("input", () => {
   if (Number($("lowNote").value) > Number($("highNote").value)) $("highNote").value = $("lowNote").value;
-  render();
+  scheduleRender();
 });
 $("highNote").addEventListener("input", () => {
   if (Number($("highNote").value) < Number($("lowNote").value)) $("lowNote").value = $("highNote").value;
-  render();
+  scheduleRender();
 });
