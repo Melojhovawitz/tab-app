@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tab Maker</title>
+  <style>
+    :root {
+      --bg: #e8edf0;
+      --ink: #16212b;
+      --muted: #5b6a77;
+      --line: #c3ced6;
+      --panel: #ffffff;
+      --accent: #0b6e6e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 40px 20px 64px; }
+    h1 { font-size: 2.2rem; margin: 0 0 6px; letter-spacing: -0.02em; }
+    h2 { font-size: 1.05rem; margin: 28px 0 10px; }
+    .lede { color: var(--muted); margin: 0 0 24px; max-width: 60ch; }
+
+    .drop {
+      position: relative;
+      display: grid;
+      gap: 4px;
+      padding: 36px 20px;
+      text-align: center;
+      border: 2px dashed var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      cursor: pointer;
+    }
+    .drop:hover, .drop.over, .drop:focus-within { border-color: var(--accent); }
+    .drop strong { font-size: 1.15rem; }
+    .drop span { color: var(--muted); font-size: 0.92rem; }
+    .drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+    audio { width: 100%; margin-top: 16px; }
+    #status { min-height: 1.5em; margin: 14px 0 6px; color: var(--muted); }
+    #status.error { color: #a12626; }
+    progress { width: 100%; height: 8px; accent-color: var(--accent); }
+
+    #controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px 24px;
+      margin-top: 18px;
+      padding: 14px 16px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    #controls label { display: grid; gap: 4px; font-size: 0.9rem; color: var(--muted); }
+    select, input[type="range"] { font: inherit; color: var(--ink); }
+    select { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+    input[type="range"] { accent-color: var(--accent); }
+
+    .chords { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+      display: grid;
+      min-width: 64px;
+      padding: 8px 12px;
+      text-align: center;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }
+    .chip b { font-size: 1.15rem; }
+    .chip small { color: var(--muted); font-size: 0.75rem; }
+
+    pre {
+      margin: 0;
+      padding: 16px;
+      overflow-x: auto;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font: 14px/1.35 ui-monospace, "Cascadia Mono", Consolas, monospace;
+    }
+    .note { margin-top: 32px; color: var(--muted); font-size: 0.9rem; }
+    [hidden] { display: none !important; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Tab Maker</h1>
+    <p class="lede">Upload a recording and get chords or tabs. Everything runs in your browser, so your file is never sent anywhere.</p>
+
+    <label class="drop" id="drop">
+      <input type="file" id="file" accept="audio/*" />
+      <strong>Choose an audio file</strong>
+      <span>MP3, WAV or M4A. Clean, single-instrument recordings work best.</span>
+    </label>
+
+    <audio id="player" controls hidden></audio>
+    <p id="status" role="status"></p>
+    <progress id="bar" max="100" value="0" hidden></progress>
+
+    <section id="controls" hidden>
+      <label>Instrument
+        <select id="instrument">
+          <option value="guitar">Guitar</option>
+          <option value="ukulele">Ukulele</option>
+          <option value="bass">Bass</option>
+        </select>
+      </label>
+      <label>Show
+        <select id="mode">
+          <option value="both">Chords and tabs</option>
+          <option value="chords">Chords only</option>
+          <option value="tabs">Tabs only</option>
+        </select>
+      </label>
+      <label>Sensitivity
+        <input type="range" id="sens" min="1" max="10" value="5" />
+      </label>
+      <label>Chord length <output id="winOut">1s</output>
+        <input type="range" id="win" min="0.5" max="4" step="0.5" value="1" />
+      </label>
+    </section>
+
+    <section id="chordsBox" hidden>
+      <h2>Chords</h2>
+      <div id="chords" class="chords"></div>
+    </section>
+
+    <section id="tabBox" hidden>
+      <h2>Tab</h2>
+      <pre id="tab"></pre>
+    </section>
+
+    <p class="note">These results are generated automatically from the audio, so expect some mistakes. Raise the sensitivity to catch more notes, or lower it to remove noise.</p>
+  </main>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
