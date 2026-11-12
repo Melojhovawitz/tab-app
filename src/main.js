@@ -9,9 +9,9 @@ const $ = (id) => document.getElementById(id);
 
 // Open-string MIDI notes, listed in the order they are drawn from bottom line to top line.
 const TUNINGS = {
-  guitar: { labels: ["E", "A", "D", "G", "B", "e"], open: [40, 45, 50, 55, 59, 64], maxFret: 17, program: 25 },
-  bass: { labels: ["E", "A", "D", "G"], open: [28, 33, 38, 43], maxFret: 17, program: 33 },
-  ukulele: { labels: ["G", "C", "E", "A"], open: [67, 60, 64, 69], maxFret: 12, program: 24 },
+  guitar: { labels: ["E", "A", "D", "G", "B", "e"], open: [40, 45, 50, 55, 59, 64], maxFret: 17, program: 25, range: [40, 88] },
+  bass: { labels: ["E", "A", "D", "G"], open: [28, 33, 38, 43], maxFret: 17, program: 33, range: [28, 67] },
+  ukulele: { labels: ["G", "C", "E", "A"], open: [67, 60, 64, 69], maxFret: 12, program: 24, range: [60, 84] },
 };
 
 const NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -66,9 +66,38 @@ function getNotes() {
   const onset = 0.8 - 0.06 * s; // sensitivity 5 -> 0.5, 10 -> 0.2
   const frame = onset * 0.6;
   const events = outputToNotesPoly(raw.frames, raw.onsets, onset, frame, 5);
-  return noteFramesToTime(addPitchBendsToNoteEvents(raw.contours, events))
-    .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds)
-    .map((n) => ({ ...n, pitchMidi: n.pitchMidi + transpose }));
+  const notes = noteFramesToTime(addPitchBendsToNoteEvents(raw.contours, events)).sort(
+    (a, b) => a.startTimeSeconds - b.startTimeSeconds
+  );
+  return cleanNotes(notes).map((n) => ({ ...n, pitchMidi: n.pitchMidi + transpose }));
+}
+
+// Drops notes outside the instrument's range, optionally joins back-to-back repeats
+// of the same pitch, then removes notes shorter than the minimum length.
+function cleanNotes(notes) {
+  const [lo, hi] = TUNINGS[$("instrument").value].range;
+  const minLen = Number($("minLen").value);
+  const inRange = notes.filter((n) => n.pitchMidi >= lo && n.pitchMidi <= hi);
+
+  let result = inRange;
+  if ($("merge").checked) {
+    const lastByPitch = new Map();
+    result = [];
+    for (const n of inRange) {
+      const prev = lastByPitch.get(n.pitchMidi);
+      const prevEnd = prev ? prev.startTimeSeconds + prev.durationSeconds : 0;
+      if (prev && n.startTimeSeconds - prevEnd < 0.08) {
+        const end = Math.max(prevEnd, n.startTimeSeconds + n.durationSeconds);
+        prev.durationSeconds = end - prev.startTimeSeconds;
+        prev.amplitude = Math.max(prev.amplitude, n.amplitude);
+      } else {
+        const copy = { ...n };
+        result.push(copy);
+        lastByPitch.set(n.pitchMidi, copy);
+      }
+    }
+  }
+  return result.filter((n) => n.durationSeconds >= minLen);
 }
 
 // ---------- notes -> tab ----------
@@ -233,6 +262,7 @@ function render() {
   const mode = $("mode").value;
   const winSec = Number($("win").value);
   $("winOut").textContent = `${winSec}s`;
+  $("lenOut").textContent = `${Number($("minLen").value).toFixed(2)}s`;
   $("tOut").textContent = transpose > 0 ? `+${transpose}` : String(transpose);
 
   $("chordsBox").hidden = mode === "tabs";
@@ -295,7 +325,7 @@ drop.addEventListener("drop", (e) => {
   handleFile(e.dataTransfer.files[0]);
 });
 
-for (const id of ["instrument", "mode", "sens", "win"]) {
+for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge"]) {
   $(id).addEventListener("input", render);
 }
 
