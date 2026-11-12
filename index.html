@@ -58,6 +58,7 @@
     }
     #controls label, #controls .field { display: grid; gap: 4px; font-size: 0.9rem; color: var(--muted); }
     #controls label.check { display: flex; align-items: center; gap: 8px; align-self: end; color: var(--ink); }
+    #rangeBox { display: flex; flex-wrap: wrap; gap: 14px 24px; flex-basis: 100%; }
     .stepper { display: flex; align-items: center; gap: 8px; }
     #tOut { min-width: 3ch; text-align: center; color: var(--ink); font-variant-numeric: tabular-nums; }
     button {
@@ -145,6 +146,18 @@
         <input type="checkbox" id="merge" checked />
         Merge repeated notes
       </label>
+      <label class="check">
+        <input type="checkbox" id="useRange" />
+        Limit pitch range
+      </label>
+      <div id="rangeBox" hidden>
+        <label>Lowest note <output id="lowOut">E2</output>
+          <input type="range" id="lowNote" min="24" max="96" step="1" value="40" />
+        </label>
+        <label>Highest note <output id="highOut">E6</output>
+          <input type="range" id="highNote" min="24" max="96" step="1" value="88" />
+        </label>
+      </div>
       <div class="field">
         <span>Transpose (semitones)</span>
         <div class="stepper">
