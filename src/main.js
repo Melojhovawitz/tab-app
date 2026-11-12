@@ -75,7 +75,11 @@ function getNotes() {
 // Drops notes outside the instrument's range, optionally joins back-to-back repeats
 // of the same pitch, then removes notes shorter than the minimum length.
 function cleanNotes(notes) {
-  const [lo, hi] = TUNINGS[$("instrument").value].range;
+  let [lo, hi] = TUNINGS[$("instrument").value].range;
+  if ($("useRange").checked) {
+    lo = Number($("lowNote").value);
+    hi = Number($("highNote").value);
+  }
   const minLen = Number($("minLen").value);
   const inRange = notes.filter((n) => n.pitchMidi >= lo && n.pitchMidi <= hi);
 
@@ -256,8 +260,20 @@ function downloadMidi() {
 
 // ---------- UI ----------
 
+const noteName = (m) => `${NAMES[m % 12]}${Math.floor(m / 12) - 1}`;
+
 function render() {
   if (!raw) return;
+  const useRange = $("useRange").checked;
+  $("rangeBox").hidden = !useRange;
+  if (!useRange) {
+    // keep the sliders ready at this instrument's normal range for when they are switched on
+    const [lo, hi] = TUNINGS[$("instrument").value].range;
+    $("lowNote").value = lo;
+    $("highNote").value = hi;
+  }
+  $("lowOut").textContent = noteName(Number($("lowNote").value));
+  $("highOut").textContent = noteName(Number($("highNote").value));
   const notes = getNotes();
   const mode = $("mode").value;
   const winSec = Number($("win").value);
@@ -325,7 +341,7 @@ drop.addEventListener("drop", (e) => {
   handleFile(e.dataTransfer.files[0]);
 });
 
-for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge"]) {
+for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange"]) {
   $(id).addEventListener("input", render);
 }
 
@@ -337,3 +353,12 @@ $("tDown").addEventListener("click", () => shift(-1));
 $("tUp").addEventListener("click", () => shift(1));
 $("tReset").addEventListener("click", () => shift(-transpose));
 $("midi").addEventListener("click", downloadMidi);
+
+$("lowNote").addEventListener("input", () => {
+  if (Number($("lowNote").value) > Number($("highNote").value)) $("highNote").value = $("lowNote").value;
+  render();
+});
+$("highNote").addEventListener("input", () => {
+  if (Number($("highNote").value) < Number($("lowNote").value)) $("lowNote").value = $("highNote").value;
+  render();
+});
