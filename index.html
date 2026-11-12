@@ -57,6 +57,7 @@
       border-radius: 8px;
     }
     #controls label, #controls .field { display: grid; gap: 4px; font-size: 0.9rem; color: var(--muted); }
+    #controls label.check { display: flex; align-items: center; gap: 8px; align-self: end; color: var(--ink); }
     .stepper { display: flex; align-items: center; gap: 8px; }
     #tOut { min-width: 3ch; text-align: center; color: var(--ink); font-variant-numeric: tabular-nums; }
     button {
@@ -136,6 +137,13 @@
       </label>
       <label>Chord length <output id="winOut">1s</output>
         <input type="range" id="win" min="0.5" max="4" step="0.5" value="1" />
+      </label>
+      <label>Minimum note length <output id="lenOut">0.10s</output>
+        <input type="range" id="minLen" min="0" max="0.4" step="0.05" value="0.1" />
+      </label>
+      <label class="check">
+        <input type="checkbox" id="merge" checked />
+        Merge repeated notes
       </label>
       <div class="field">
         <span>Transpose (semitones)</span>
