@@ -56,7 +56,20 @@
       border: 1px solid var(--line);
       border-radius: 8px;
     }
-    #controls label { display: grid; gap: 4px; font-size: 0.9rem; color: var(--muted); }
+    #controls label, #controls .field { display: grid; gap: 4px; font-size: 0.9rem; color: var(--muted); }
+    .stepper { display: flex; align-items: center; gap: 8px; }
+    #tOut { min-width: 3ch; text-align: center; color: var(--ink); font-variant-numeric: tabular-nums; }
+    button {
+      font: inherit;
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 5px 12px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    #midi { align-self: end; background: var(--accent); border-color: var(--accent); color: #fff; }
     select, input[type="range"] { font: inherit; color: var(--ink); }
     select { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
     input[type="range"] { accent-color: var(--accent); }
@@ -124,6 +137,16 @@
       <label>Chord length <output id="winOut">1s</output>
         <input type="range" id="win" min="0.5" max="4" step="0.5" value="1" />
       </label>
+      <div class="field">
+        <span>Transpose (semitones)</span>
+        <div class="stepper">
+          <button type="button" id="tDown" aria-label="Transpose down one semitone">&minus;</button>
+          <output id="tOut">0</output>
+          <button type="button" id="tUp" aria-label="Transpose up one semitone">+</button>
+          <button type="button" id="tReset">Reset</button>
+        </div>
+      </div>
+      <button type="button" id="midi">Download MIDI</button>
     </section>
 
     <section id="chordsBox" hidden>
