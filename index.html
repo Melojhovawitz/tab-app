@@ -76,6 +76,7 @@
     select { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
     input[type="range"] { accent-color: var(--accent); }
 
+    .keyinfo { margin: -4px 0 10px; color: var(--muted); font-size: 0.9rem; }
     .analyze { display: flex; flex-wrap: wrap; align-items: end; gap: 12px 20px; margin-top: 14px; }
     .analyze label { display: grid; gap: 4px; font-size: 0.9rem; color: var(--muted); }
     input[type="number"] {
@@ -163,8 +164,8 @@
       <label>Sensitivity
         <input type="range" id="sens" min="1" max="10" value="5" />
       </label>
-      <label>Chord length <output id="winOut">1s</output>
-        <input type="range" id="win" min="0.5" max="4" step="0.5" value="1" />
+      <label>Chord length <output id="winOut">2s</output>
+        <input type="range" id="win" min="0.5" max="4" step="0.5" value="2" />
       </label>
       <label>Minimum note length <output id="lenOut">0.10s</output>
         <input type="range" id="minLen" min="0" max="0.4" step="0.05" value="0.1" />
@@ -172,6 +173,10 @@
       <label class="check">
         <input type="checkbox" id="merge" checked />
         Merge repeated notes
+      </label>
+      <label class="check">
+        <input type="checkbox" id="inKey" checked />
+        Favor the song's key
       </label>
       <label class="check">
         <input type="checkbox" id="sevenths" checked />
@@ -203,6 +208,7 @@
 
     <section id="chordsBox" hidden>
       <h2>Chords</h2>
+      <p id="keyInfo" class="keyinfo"></p>
       <div id="chords" class="chords"></div>
     </section>
 
