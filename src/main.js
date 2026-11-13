@@ -1,9 +1,5 @@
-import {
-  BasicPitch,
-  noteFramesToTime,
-  addPitchBendsToNoteEvents,
-  outputToNotesPoly,
-} from "@spotify/basic-pitch";
+import * as tf from "@tensorflow/tfjs";
+import { BasicPitch, noteFramesToTime, outputToNotesPoly } from "@spotify/basic-pitch";
 
 const $ = (id) => document.getElementById(id);
 
@@ -26,6 +22,8 @@ const SHAPES = {
 let raw = null; // model output, kept so sliders can re-run without re-analysing
 let transpose = 0; // semitones, applied to tabs, chords and the MIDI file
 let currentName = "song";
+let currentFile = null; // kept so "Analyze again" can reuse it
+let analysisOffset = 0; // seconds into the song where the analysed section starts
 
 // ---------- audio + model ----------
 
@@ -42,23 +40,39 @@ async function decodeMono(file) {
 }
 
 async function runModel(file) {
-  const audio = await decodeMono(file);
+  const full = await decodeMono(file);
+  const startSec = Math.max(0, Number($("startAt").value) || 0);
+  const lenSec = Number($("lenSel").value); // 0 means the whole song
+  const from = Math.floor(startSec * 22050);
+  if (from >= full.length - 22050) throw new Error("range");
+  const to = lenSec > 0 ? Math.min(full.length, from + lenSec * 22050) : full.length;
+  const audio = full.subarray(from, to);
+  analysisOffset = from / 22050;
+  await tf.ready();
+  const gpu = tf.getBackend() === "webgl";
+  console.log("TensorFlow backend:", tf.getBackend());
+  setStatus(
+    gpu
+      ? "Analysing the audio using your graphics chip."
+      : "Analysing the audio on the CPU, which is slower. Enabling hardware acceleration in your browser can help."
+  );
+
+  // The pitch contours are about three times bigger than everything else and the app never uses them,
+  // so they are not collected at all.
   const frames = [];
   const onsets = [];
-  const contours = [];
   const bp = new BasicPitch(import.meta.env.BASE_URL + "model/model.json");
   await bp.evaluateModel(
     audio,
-    (f, o, c) => {
+    (f, o) => {
       frames.push(...f);
       onsets.push(...o);
-      contours.push(...c);
     },
     (p) => {
       $("bar").value = Math.round(p * 100);
     }
   );
-  return { frames, onsets, contours };
+  return { frames, onsets };
 }
 
 let baseNotes = null; // detected notes for the current sensitivity, reused by every other control
@@ -76,10 +90,10 @@ function getNotes() {
 function detectNotes(s) {
   const onset = 0.8 - 0.06 * s; // sensitivity 5 -> 0.5, 10 -> 0.2
   const frame = onset * 0.6;
-  const events = outputToNotesPoly(raw.frames, raw.onsets, onset, frame, 5);
-  const notes = noteFramesToTime(addPitchBendsToNoteEvents(raw.contours, events)).sort(
-    (a, b) => a.startTimeSeconds - b.startTimeSeconds
-  );
+  // Pitch bends are not used by this app, and the "melodia" gap-filling pass (switched off by the
+  // final false below) is the slowest part on long songs, so both are skipped.
+  const events = outputToNotesPoly(raw.frames, raw.onsets, onset, frame, 5, true, null, null, false);
+  const notes = noteFramesToTime(events).sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
   return notes;
 }
 
@@ -154,7 +168,7 @@ function renderTab(positions, tuning, step = 0.25, perRow = 20) {
 
   const rows = [];
   for (let start = 0; start < cols; start += perRow) {
-    const lines = [`${fmtTime(start * step)}`];
+    const lines = [`${fmtTime(start * step + analysisOffset)}`];
     for (let s = strings - 1; s >= 0; s--) {
       lines.push(`${tuning.labels[s]}|${grid[s].slice(start, start + perRow).join("")}|`);
     }
@@ -205,7 +219,7 @@ function renderChords(list) {
     const name = document.createElement("b");
     name.textContent = c.chord;
     const time = document.createElement("small");
-    time.textContent = fmtTime(c.time);
+    time.textContent = fmtTime(c.time + analysisOffset);
     chip.append(name, time);
     box.append(chip);
   }
@@ -310,6 +324,7 @@ function setStatus(text, isError = false) {
 
 async function handleFile(file) {
   if (!file) return;
+  currentFile = file;
   raw = null;
   baseNotes = null;
   transpose = 0;
@@ -328,18 +343,28 @@ async function handleFile(file) {
 
   try {
     raw = await runModel(file);
-    setStatus(`Done: ${file.name}`);
+    setStatus("Finding the notes…");
+    await new Promise((r) => setTimeout(r, 30)); // lets the page repaint before the heavy step
     $("controls").hidden = false;
     render();
+    setStatus(`Done: ${file.name}`);
   } catch (err) {
     console.error(err);
-    setStatus("Couldn't read that file. Try an MP3 or WAV.", true);
+    setStatus(
+      err.message === "range"
+        ? "That start time is past the end of the song. Lower the start time and try again."
+        : "Couldn't read that file. Try an MP3 or WAV.",
+      true
+    );
   } finally {
     $("bar").hidden = true;
   }
 }
 
 $("file").addEventListener("change", (e) => handleFile(e.target.files[0]));
+$("reanalyze").addEventListener("click", () => {
+  if (currentFile) handleFile(currentFile);
+});
 
 const drop = $("drop");
 drop.addEventListener("dragover", (e) => {
@@ -354,14 +379,21 @@ drop.addEventListener("drop", (e) => {
 });
 
 let renderTimer = 0;
-function scheduleRender(delay = 60) {
+function scheduleRender(delay = 60, busy = false) {
   clearTimeout(renderTimer);
-  renderTimer = setTimeout(render, delay);
+  renderTimer = setTimeout(async () => {
+    if (busy) {
+      setStatus("Updating…");
+      await new Promise((r) => setTimeout(r, 30)); // lets the page repaint first
+    }
+    render();
+    if (busy && currentFile) setStatus(`Done: ${currentFile.name}`);
+  }, delay);
 }
 
 for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange"]) {
   // sensitivity re-detects every note, so wait until the slider stops moving
-  $(id).addEventListener("input", () => scheduleRender(id === "sens" ? 350 : 60));
+  $(id).addEventListener("input", () => scheduleRender(id === "sens" ? 350 : 60, id === "sens"));
 }
 
 function shift(by) {
