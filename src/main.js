@@ -154,27 +154,165 @@ function fmtTime(t) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function renderTab(positions, tuning, step = 0.25, perRow = 20) {
-  if (!positions.length) return "No notes found in this instrument's range. Try raising the sensitivity.";
-  const last = positions.reduce((m, p) => Math.max(m, p.time), 0);
-  const cols = Math.floor(last / step) + 1;
+// ---------- tab editing ----------
+
+const TAB_STEP = 0.25; // seconds per tab column
+const PER_ROW = 20; // columns per row of tab
+const editsByInstrument = { guitar: new Map(), bass: new Map(), ukulele: new Map() };
+const getEdits = () => editsByInstrument[$("instrument").value];
+const hasEdits = () => getEdits().size > 0;
+let selected = null; // { col, string } of the spot being edited
+let lastTab = null; // { grid, tuning, cols } for the tab currently on screen
+let digitBuffer = "";
+let digitTime = 0;
+
+const cellText = (fret) => (fret === null ? "" : String(fret)).padEnd(3, "-");
+
+// Builds the grid of frets (null = empty) from the detected notes, then puts the user's edits on top.
+function buildGrid(positions, tuning) {
   const strings = tuning.open.length;
-  const grid = Array.from({ length: strings }, () => Array(cols).fill("---"));
-
+  const edits = getEdits();
+  let cols = positions.reduce((m, p) => Math.max(m, Math.floor(p.time / TAB_STEP) + 1), 0);
+  for (const key of edits.keys()) cols = Math.max(cols, Number(key.split(":")[0]) + 1);
+  cols = Math.max(1, Math.ceil(cols / PER_ROW)) * PER_ROW; // pad so the last row has empty spots to click
+  const grid = Array.from({ length: strings }, () => Array(cols).fill(null));
   for (const p of positions) {
-    const col = Math.floor(p.time / step);
-    if (grid[p.string][col] === "---") grid[p.string][col] = String(p.fret).padEnd(3, "-");
+    const col = Math.floor(p.time / TAB_STEP);
+    if (grid[p.string][col] === null) grid[p.string][col] = p.fret;
   }
+  for (const [key, fret] of edits) {
+    const [col, s] = key.split(":").map(Number);
+    if (s < strings) grid[s][col] = fret; // a fret of null means the note was removed
+  }
+  return { grid, cols };
+}
 
+function renderTab(positions, tuning) {
+  const box = $("tab");
+  box.replaceChildren();
+  if (!positions.length && !hasEdits()) {
+    lastTab = null;
+    box.textContent = "No notes found in this instrument's range. Try raising the sensitivity.";
+    updateEditBar();
+    return;
+  }
+  const { grid, cols } = buildGrid(positions, tuning);
+  lastTab = { grid, tuning, cols };
+  if (selected && (selected.string >= tuning.open.length || selected.col >= cols)) selected = null;
+
+  const edits = getEdits();
+  for (let start = 0; start < cols; start += PER_ROW) {
+    box.append(`${fmtTime(start * TAB_STEP + analysisOffset)}\n`);
+    for (let s = tuning.open.length - 1; s >= 0; s--) {
+      box.append(`${tuning.labels[s]}|`);
+      for (let c = start; c < start + PER_ROW; c++) {
+        const cell = document.createElement("span");
+        cell.className = "cell";
+        cell.dataset.col = c;
+        cell.dataset.string = s;
+        cell.textContent = cellText(grid[s][c]);
+        if (edits.has(`${c}:${s}`)) cell.classList.add("edited");
+        if (selected && selected.col === c && selected.string === s) cell.classList.add("selected");
+        box.append(cell);
+      }
+      box.append("|\n");
+    }
+    box.append("\n");
+  }
+  updateEditBar();
+}
+
+function cellEl(col, s) {
+  return $("tab").querySelector(`.cell[data-col="${col}"][data-string="${s}"]`);
+}
+
+function selectCell(col, s, scroll = false) {
+  if (!lastTab) return;
+  if (selected) cellEl(selected.col, selected.string)?.classList.remove("selected");
+  selected = { col, string: s };
+  const el = cellEl(col, s);
+  el?.classList.add("selected");
+  if (scroll) el?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  updateEditBar();
+}
+
+// fret is a number, or null to remove the note
+function setFret(fret) {
+  if (!selected || !lastTab) return;
+  const { col, string } = selected;
+  const value = fret === null ? null : Math.max(0, Math.min(24, Math.round(fret)));
+  getEdits().set(`${col}:${string}`, value);
+  lastTab.grid[string][col] = value;
+  const el = cellEl(col, string);
+  if (el) {
+    el.textContent = cellText(value);
+    el.classList.add("edited");
+  }
+  updateEditBar();
+}
+
+function updateEditBar() {
+  const active = Boolean(selected && lastTab);
+  for (const id of ["fretIn", "fretMinus", "fretPlus", "fretClear"]) $(id).hidden = !active;
+  $("resetEdits").hidden = !hasEdits();
+  const info = $("selInfo");
+  if (!active) {
+    info.textContent = "Click a spot in the tab to edit it.";
+    return;
+  }
+  const { col, string } = selected;
+  const fret = lastTab.grid[string][col];
+  info.textContent =
+    `${lastTab.tuning.labels[string]} string at ${fmtTime(col * TAB_STEP + analysisOffset)}: ` +
+    (fret === null ? "empty" : `fret ${fret}`);
+  $("fretIn").value = fret === null ? "" : fret;
+}
+
+function tabAsText() {
+  if (!lastTab) return "";
+  const { grid, tuning, cols } = lastTab;
   const rows = [];
-  for (let start = 0; start < cols; start += perRow) {
-    const lines = [`${fmtTime(start * step + analysisOffset)}`];
-    for (let s = strings - 1; s >= 0; s--) {
-      lines.push(`${tuning.labels[s]}|${grid[s].slice(start, start + perRow).join("")}|`);
+  for (let start = 0; start < cols; start += PER_ROW) {
+    const lines = [fmtTime(start * TAB_STEP + analysisOffset)];
+    for (let s = tuning.open.length - 1; s >= 0; s--) {
+      const cells = grid[s].slice(start, start + PER_ROW).map((f) => cellText(f));
+      lines.push(`${tuning.labels[s]}|${cells.join("")}|`);
     }
     rows.push(lines.join("\n"));
   }
   return rows.join("\n\n");
+}
+
+function downloadTab() {
+  const text = tabAsText();
+  if (!text) return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  a.download = `${currentName}-tab.txt`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// When the tab has been edited, the MIDI file is built from the tab itself so the two agree.
+// Timing is rounded to the tab's columns.
+function notesFromTab() {
+  const tuning = TUNINGS[$("instrument").value];
+  const { grid, cols } = buildGrid(toTab(getNotes(), tuning), tuning);
+  const out = [];
+  grid.forEach((line, s) => {
+    for (let c = 0; c < cols; c++) {
+      if (line[c] === null) continue;
+      let next = c + 1;
+      while (next < cols && line[next] === null) next++;
+      out.push({
+        startTimeSeconds: c * TAB_STEP,
+        durationSeconds: Math.min(1, (next - c) * TAB_STEP),
+        pitchMidi: tuning.open[s] + line[c],
+        amplitude: 0.7,
+      });
+    }
+  });
+  return out.sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
 }
 
 // ---------- notes -> chords ----------
@@ -315,7 +453,7 @@ function buildMidi(notes, program) {
 
 function downloadMidi() {
   if (!raw) return;
-  const notes = getNotes();
+  const notes = hasEdits() ? notesFromTab() : getNotes();
   if (!notes.length) {
     setStatus("No notes to export. Try raising the sensitivity.", true);
     return;
@@ -362,7 +500,7 @@ function render() {
   }
   if (mode !== "chords") {
     const tuning = TUNINGS[$("instrument").value];
-    $("tab").textContent = renderTab(toTab(notes, tuning), tuning);
+    renderTab(toTab(notes, tuning), tuning);
   }
 }
 
@@ -375,6 +513,8 @@ function setStatus(text, isError = false) {
 async function handleFile(file) {
   if (!file) return;
   currentFile = file;
+  for (const m of Object.values(editsByInstrument)) m.clear();
+  selected = null;
   raw = null;
   baseNotes = null;
   transpose = 0;
@@ -463,3 +603,63 @@ $("highNote").addEventListener("input", () => {
   if (Number($("highNote").value) < Number($("lowNote").value)) $("lowNote").value = $("highNote").value;
   scheduleRender();
 });
+
+// ---------- tab editing: events ----------
+
+$("tab").addEventListener("click", (e) => {
+  const cell = e.target.closest(".cell");
+  if (!cell) return;
+  selectCell(Number(cell.dataset.col), Number(cell.dataset.string));
+  $("tab").focus({ preventScroll: true });
+});
+
+$("tab").addEventListener("keydown", (e) => {
+  if (!selected || !lastTab) return;
+  const { col, string } = selected;
+  const strings = lastTab.tuning.open.length;
+  const fret = lastTab.grid[string][col];
+  const move = (c, s) => {
+    e.preventDefault();
+    selectCell(Math.max(0, Math.min(lastTab.cols - 1, c)), Math.max(0, Math.min(strings - 1, s)), true);
+  };
+  if (e.key === "ArrowLeft") move(col - 1, string);
+  else if (e.key === "ArrowRight") move(col + 1, string);
+  else if (e.key === "ArrowUp") move(col, string + 1);
+  else if (e.key === "ArrowDown") move(col, string - 1);
+  else if (e.key === "Delete" || e.key === "Backspace") {
+    e.preventDefault();
+    setFret(null);
+  } else if (e.key === "+" || e.key === "=") {
+    e.preventDefault();
+    setFret(fret === null ? 0 : fret + 1);
+  } else if (e.key === "-") {
+    e.preventDefault();
+    if (fret !== null) setFret(fret - 1);
+  } else if (/^[0-9]$/.test(e.key)) {
+    e.preventDefault();
+    const now = Date.now();
+    digitBuffer = now - digitTime < 800 && digitBuffer.length < 2 ? digitBuffer + e.key : e.key;
+    digitTime = now;
+    setFret(Number(digitBuffer));
+  }
+});
+
+$("fretIn").addEventListener("input", (e) => {
+  if (e.target.value !== "") setFret(Number(e.target.value));
+});
+$("fretPlus").addEventListener("click", () => {
+  if (!selected || !lastTab) return;
+  const fret = lastTab.grid[selected.string][selected.col];
+  setFret(fret === null ? 0 : fret + 1);
+});
+$("fretMinus").addEventListener("click", () => {
+  if (!selected || !lastTab) return;
+  const fret = lastTab.grid[selected.string][selected.col];
+  if (fret !== null) setFret(fret - 1);
+});
+$("fretClear").addEventListener("click", () => setFret(null));
+$("resetEdits").addEventListener("click", () => {
+  getEdits().clear();
+  render();
+});
+$("dlTab").addEventListener("click", downloadTab);
