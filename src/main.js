@@ -179,11 +179,12 @@ function renderTab(positions, tuning, step = 0.25, perRow = 20) {
 
 // ---------- notes -> chords ----------
 
-function detectChord(windowNotes) {
+function detectChord(windowNotes, scale = null) {
   const weights = new Array(12).fill(0);
   for (const n of windowNotes) weights[n.pitchMidi % 12] += n.durationSeconds * n.amplitude;
   const total = weights.reduce((a, b) => a + b, 0);
   const withSevenths = $("sevenths").checked;
+  if (weights.filter((v) => v > 0).length < 2) return null; // one note is not enough to name a chord
   let best = { score: 0, name: null };
   for (let root = 0; root < 12; root++) {
     for (const [suffix, shape] of Object.entries(SHAPES)) {
@@ -193,20 +194,59 @@ function detectChord(windowNotes) {
       // note and any stray sound in the mix lands on that note. The penalty means the extra note has
       // to be clearly present before the 7th chord wins.
       const complexity = shape.length > 3 ? total * 0.2 : 0;
-      const score = inChord - (total - inChord) * 0.5 - complexity;
+      // Chords built only from the song's key get a head start. Others can still win, but the notes
+      // have to be clearly present, so real borrowed chords are not blocked outright.
+      const outOfKey = scale && !shape.every((i) => scale.has((root + i) % 12)) ? total * 0.25 : 0;
+      const score = inChord - (total - inChord) * 0.5 - complexity - outOfKey;
       if (score > best.score) best = { score, name: NAMES[root] + suffix };
     }
   }
   return best.name;
 }
 
-function toChords(notes, windowSec) {
+// Krumhansl-Schmuckler key finding: compares how much each note is used against typical
+// major and minor key profiles and picks the best of the 24 keys.
+const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+
+function estimateKey(notes) {
+  if (!notes.length) return null;
+  const w = new Array(12).fill(0);
+  for (const n of notes) w[((n.pitchMidi % 12) + 12) % 12] += n.durationSeconds * n.amplitude;
+
+  const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+  const mw = mean(w);
+  let best = null;
+  for (const minor of [false, true]) {
+    const profile = minor ? MINOR_PROFILE : MAJOR_PROFILE;
+    for (let tonic = 0; tonic < 12; tonic++) {
+      const ys = w.map((_, pc) => profile[(pc - tonic + 12) % 12]);
+      const my = mean(ys);
+      let num = 0, dx = 0, dy = 0;
+      for (let i = 0; i < 12; i++) {
+        num += (w[i] - mw) * (ys[i] - my);
+        dx += (w[i] - mw) ** 2;
+        dy += (ys[i] - my) ** 2;
+      }
+      const score = num / Math.sqrt(dx * dy || 1);
+      if (!best || score > best.score) best = { score, tonic, minor };
+    }
+  }
+  // A minor key uses the same seven notes as the major key three semitones above it.
+  const scaleRoot = best.minor ? (best.tonic + 3) % 12 : best.tonic;
+  return {
+    scale: new Set([0, 2, 4, 5, 7, 9, 11].map((i) => (scaleRoot + i) % 12)),
+    label: `${NAMES[best.tonic]} ${best.minor ? "minor" : "major"}`,
+  };
+}
+
+function toChords(notes, windowSec, scale = null) {
   if (!notes.length) return [];
   const end = notes.reduce((m, n) => Math.max(m, n.startTimeSeconds), 0);
   const out = [];
   for (let t = 0; t <= end; t += windowSec) {
     const inWindow = notes.filter((n) => n.startTimeSeconds >= t && n.startTimeSeconds < t + windowSec);
-    const chord = inWindow.length ? detectChord(inWindow) : null;
+    const chord = inWindow.length ? detectChord(inWindow, scale) : null;
     if (chord && chord !== out[out.length - 1]?.chord) out.push({ time: t, chord });
   }
   return out;
@@ -315,7 +355,11 @@ function render() {
   $("chordsBox").hidden = mode === "tabs";
   $("tabBox").hidden = mode === "chords";
 
-  if (mode !== "tabs") renderChords(toChords(notes, winSec));
+  if (mode !== "tabs") {
+    const key = $("inKey").checked ? estimateKey(notes) : null;
+    $("keyInfo").textContent = key ? `Detected key: ${key.label}. Chords from this key are favored.` : "";
+    renderChords(toChords(notes, winSec, key ? key.scale : null));
+  }
   if (mode !== "chords") {
     const tuning = TUNINGS[$("instrument").value];
     $("tab").textContent = renderTab(toTab(notes, tuning), tuning);
@@ -397,7 +441,7 @@ function scheduleRender(delay = 60, busy = false) {
   }, delay);
 }
 
-for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange", "sevenths"]) {
+for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange", "sevenths", "inKey"]) {
   // sensitivity re-detects every note, so wait until the slider stops moving
   $(id).addEventListener("input", () => scheduleRender(id === "sens" ? 350 : 60, id === "sens"));
 }
