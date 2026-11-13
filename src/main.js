@@ -183,11 +183,17 @@ function detectChord(windowNotes) {
   const weights = new Array(12).fill(0);
   for (const n of windowNotes) weights[n.pitchMidi % 12] += n.durationSeconds * n.amplitude;
   const total = weights.reduce((a, b) => a + b, 0);
+  const withSevenths = $("sevenths").checked;
   let best = { score: 0, name: null };
   for (let root = 0; root < 12; root++) {
     for (const [suffix, shape] of Object.entries(SHAPES)) {
+      if (shape.length > 3 && !withSevenths) continue;
       const inChord = shape.reduce((sum, i) => sum + weights[(root + i) % 12], 0);
-      const score = inChord - (total - inChord) * 0.5;
+      // A 7th chord always scores at least as high as its plain triad, because it only adds one more
+      // note and any stray sound in the mix lands on that note. The penalty means the extra note has
+      // to be clearly present before the 7th chord wins.
+      const complexity = shape.length > 3 ? total * 0.2 : 0;
+      const score = inChord - (total - inChord) * 0.5 - complexity;
       if (score > best.score) best = { score, name: NAMES[root] + suffix };
     }
   }
@@ -391,7 +397,7 @@ function scheduleRender(delay = 60, busy = false) {
   }, delay);
 }
 
-for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange"]) {
+for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange", "sevenths"]) {
   // sensitivity re-detects every note, so wait until the slider stops moving
   $(id).addEventListener("input", () => scheduleRender(id === "sens" ? 350 : 60, id === "sens"));
 }
