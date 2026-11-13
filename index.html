@@ -76,7 +76,18 @@
     select { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
     input[type="range"] { accent-color: var(--accent); }
 
-    .chords { display: flex; flex-wrap: wrap; gap: 8px; }
+    .analyze { display: flex; flex-wrap: wrap; align-items: end; gap: 12px 20px; margin-top: 14px; }
+    .analyze label { display: grid; gap: 4px; font-size: 0.9rem; color: var(--muted); }
+    input[type="number"] {
+      font: inherit;
+      width: 9ch;
+      padding: 5px 8px;
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }
+    .chords { display: flex; flex-wrap: wrap; gap: 8px; max-height: 40vh; overflow-y: auto; }
     .chip {
       display: grid;
       min-width: 64px;
@@ -92,7 +103,8 @@
     pre {
       margin: 0;
       padding: 16px;
-      overflow-x: auto;
+      overflow: auto;
+      max-height: 70vh;
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -113,6 +125,21 @@
       <strong>Choose an audio file</strong>
       <span>MP3, WAV or M4A. Clean, single-instrument recordings work best.</span>
     </label>
+
+    <div class="analyze">
+      <label>Analyze
+        <select id="lenSel">
+          <option value="0" selected>Whole song</option>
+          <option value="30">30 seconds</option>
+          <option value="60">60 seconds</option>
+          <option value="120">2 minutes</option>
+        </select>
+      </label>
+      <label>Starting at (seconds)
+        <input type="number" id="startAt" min="0" value="0" />
+      </label>
+      <button type="button" id="reanalyze">Analyze again</button>
+    </div>
 
     <audio id="player" controls hidden></audio>
     <p id="status" role="status"></p>
