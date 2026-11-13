@@ -162,6 +162,14 @@
           <option value="bass">Bass</option>
         </select>
       </label>
+      <label>Pull out
+        <select id="part">
+          <option value="all">Everything</option>
+          <option value="melody">Melody (top line)</option>
+          <option value="bass">Bass line</option>
+          <option value="chords">Chords and rhythm</option>
+        </select>
+      </label>
       <label>Show
         <select id="mode">
           <option value="both">Chords and tabs</option>
@@ -222,6 +230,7 @@
 
     <section id="tabBox" hidden>
       <h2>Tab</h2>
+      <p id="partInfo" class="hint"></p>
       <div class="editbar">
         <span id="selInfo">Click a spot in the tab to edit it.</span>
         <input type="number" id="fretIn" min="0" max="24" aria-label="Fret number" hidden />
