@@ -78,13 +78,13 @@ async function runModel(file) {
 let baseNotes = null; // detected notes for the current sensitivity, reused by every other control
 let baseSens = null;
 
-function getNotes() {
+function getNotes(part = $("part").value) {
   const s = Number($("sens").value);
   if (!baseNotes || baseSens !== s) {
     baseNotes = detectNotes(s);
     baseSens = s;
   }
-  return cleanNotes(baseNotes).map((n) => ({ ...n, pitchMidi: n.pitchMidi + transpose }));
+  return cleanNotes(baseNotes, part).map((n) => ({ ...n, pitchMidi: n.pitchMidi + transpose }));
 }
 
 function detectNotes(s) {
@@ -99,7 +99,7 @@ function detectNotes(s) {
 
 // Drops notes outside the instrument's range, optionally joins back-to-back repeats
 // of the same pitch, then removes notes shorter than the minimum length.
-function cleanNotes(notes) {
+function cleanNotes(notes, part = "all") {
   let [lo, hi] = TUNINGS[$("instrument").value].range;
   if ($("useRange").checked) {
     lo = Number($("lowNote").value);
@@ -126,7 +126,59 @@ function cleanNotes(notes) {
       }
     }
   }
-  return result.filter((n) => n.durationSeconds >= minLen);
+  return pickPart(result.filter((n) => n.durationSeconds >= minLen), part);
+}
+
+// ---------- pulling out a part ----------
+// This sorts notes by pitch and by how many sound together. It cannot tell instruments apart,
+// so a voice and a guitar playing the same pitches look identical to it.
+
+const PART_RANGE = { melody: [52, 96], bass: [24, 60], chords: [40, 76] }; // MIDI notes
+const PART_INFO = {
+  all: "",
+  melody: "Melody shows the highest note at each moment, from about E3 up. It can't tell a voice from a lead guitar or a synth.",
+  bass: "Bass line shows the lowest note at each moment, up to about C4.",
+  chords: "Chords and rhythm shows moments where three or more notes sound together.",
+};
+
+function pickPart(notes, part) {
+  if (part === "all" || !notes.length) return notes;
+  const [lo, hi] = PART_RANGE[part];
+  const pool = notes.filter((n) => n.pitchMidi >= lo && n.pitchMidi <= hi);
+  if (!pool.length) return pool;
+
+  const FRAME = 0.05; // seconds
+  const end = pool.reduce((m, n) => Math.max(m, n.startTimeSeconds + n.durationSeconds), 0);
+  const size = Math.ceil(end / FRAME) + 1;
+  const top = new Array(size).fill(-Infinity);
+  const bottom = new Array(size).fill(Infinity);
+  const count = new Array(size).fill(0);
+  const span = (n) => {
+    const a = Math.floor(n.startTimeSeconds / FRAME);
+    const b = Math.max(a, Math.ceil((n.startTimeSeconds + n.durationSeconds) / FRAME) - 1);
+    return [a, b];
+  };
+
+  for (const n of pool) {
+    const [a, b] = span(n);
+    for (let f = a; f <= b; f++) {
+      if (n.pitchMidi > top[f]) top[f] = n.pitchMidi;
+      if (n.pitchMidi < bottom[f]) bottom[f] = n.pitchMidi;
+      count[f]++;
+    }
+  }
+
+  // Keep a note if it is the top (or bottom) note, or part of a group of 3+, for at least half its length.
+  return pool.filter((n) => {
+    const [a, b] = span(n);
+    let hits = 0;
+    for (let f = a; f <= b; f++) {
+      if (part === "melody" && n.pitchMidi === top[f]) hits++;
+      else if (part === "bass" && n.pitchMidi === bottom[f]) hits++;
+      else if (part === "chords" && count[f] >= 3) hits++;
+    }
+    return hits / (b - a + 1) >= 0.5;
+  });
 }
 
 // ---------- notes -> tab ----------
@@ -158,8 +210,12 @@ function fmtTime(t) {
 
 const TAB_STEP = 0.25; // seconds per tab column
 const PER_ROW = 20; // columns per row of tab
-const editsByInstrument = { guitar: new Map(), bass: new Map(), ukulele: new Map() };
-const getEdits = () => editsByInstrument[$("instrument").value];
+const editStore = new Map(); // one set of edits per instrument and part
+const getEdits = () => {
+  const key = `${$("instrument").value}:${$("part").value}`;
+  if (!editStore.has(key)) editStore.set(key, new Map());
+  return editStore.get(key);
+};
 const hasEdits = () => getEdits().size > 0;
 let selected = null; // { col, string } of the spot being edited
 let lastTab = null; // { grid, tuning, cols } for the tab currently on screen
@@ -494,11 +550,13 @@ function render() {
   $("tabBox").hidden = mode === "chords";
 
   if (mode !== "tabs") {
-    const key = $("inKey").checked ? estimateKey(notes) : null;
+    const chordNotes = getNotes("all"); // chords always come from the whole mix, not the picked part
+    const key = $("inKey").checked ? estimateKey(chordNotes) : null;
     $("keyInfo").textContent = key ? `Detected key: ${key.label}. Chords from this key are favored.` : "";
-    renderChords(toChords(notes, winSec, key ? key.scale : null));
+    renderChords(toChords(chordNotes, winSec, key ? key.scale : null));
   }
   if (mode !== "chords") {
+    $("partInfo").textContent = PART_INFO[$("part").value];
     const tuning = TUNINGS[$("instrument").value];
     renderTab(toTab(notes, tuning), tuning);
   }
@@ -513,7 +571,7 @@ function setStatus(text, isError = false) {
 async function handleFile(file) {
   if (!file) return;
   currentFile = file;
-  for (const m of Object.values(editsByInstrument)) m.clear();
+  editStore.clear();
   selected = null;
   raw = null;
   baseNotes = null;
@@ -581,7 +639,7 @@ function scheduleRender(delay = 60, busy = false) {
   }, delay);
 }
 
-for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange", "sevenths", "inKey"]) {
+for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange", "sevenths", "inKey", "part"]) {
   // sensitivity re-detects every note, so wait until the slider stops moving
   $(id).addEventListener("input", () => scheduleRender(id === "sens" ? 350 : 60, id === "sens"));
 }
@@ -663,3 +721,9 @@ $("resetEdits").addEventListener("click", () => {
   render();
 });
 $("dlTab").addEventListener("click", downloadTab);
+
+// Picking the bass line switches to the bass instrument, and leaving it switches back to guitar.
+$("part").addEventListener("input", () => {
+  if ($("part").value === "bass") $("instrument").value = "bass";
+  else if ($("instrument").value === "bass") $("instrument").value = "guitar";
+});
