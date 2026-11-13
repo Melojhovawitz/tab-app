@@ -76,6 +76,14 @@
     select { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
     input[type="range"] { accent-color: var(--accent); }
 
+    .editbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 10px; }
+    #selInfo { margin-right: 6px; color: var(--muted); font-size: 0.9rem; }
+    #fretIn { width: 6ch; }
+    .cell { border-radius: 3px; cursor: pointer; }
+    .cell:hover { background: #d9e6e6; }
+    .cell.edited { color: var(--accent); font-weight: 700; }
+    .cell.selected { background: var(--accent); color: #fff; }
+    .hint { margin: 8px 0 0; color: var(--muted); font-size: 0.85rem; }
     .keyinfo { margin: -4px 0 10px; color: var(--muted); font-size: 0.9rem; }
     .analyze { display: flex; flex-wrap: wrap; align-items: end; gap: 12px 20px; margin-top: 14px; }
     .analyze label { display: grid; gap: 4px; font-size: 0.9rem; color: var(--muted); }
@@ -214,7 +222,17 @@
 
     <section id="tabBox" hidden>
       <h2>Tab</h2>
-      <pre id="tab"></pre>
+      <div class="editbar">
+        <span id="selInfo">Click a spot in the tab to edit it.</span>
+        <input type="number" id="fretIn" min="0" max="24" aria-label="Fret number" hidden />
+        <button type="button" id="fretMinus" aria-label="Lower the note by one fret" hidden>&minus;1</button>
+        <button type="button" id="fretPlus" aria-label="Raise the note by one fret" hidden>+1</button>
+        <button type="button" id="fretClear" hidden>Remove note</button>
+        <button type="button" id="resetEdits" hidden>Reset my edits</button>
+        <button type="button" id="dlTab">Download tab (.txt)</button>
+      </div>
+      <pre id="tab" tabindex="0" aria-label="Tab. Click a spot, then type a fret number."></pre>
+      <p class="hint">Keyboard: arrow keys move, type a number to set the fret, Delete removes a note, + and - change the fret.</p>
     </section>
 
     <p class="note">These results are generated automatically from the audio, so expect some mistakes. Raise the sensitivity to catch more notes, or lower it to remove noise.</p>
