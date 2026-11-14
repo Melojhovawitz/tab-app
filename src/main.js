@@ -652,6 +652,77 @@ function computeChroma(audio, sr = 22050) {
 
 const CHANGE_COST = 0.15; // how much a chord change has to be worth, so the result doesn't flicker
 
+// ---------- lining chords up with the bars ----------
+// Chords change on bar lines, so measuring one bar at a time works much better than fixed slices.
+// Given the tempo, this finds where the bar lines fall by looking for the alignment where the sound
+// inside each bar is most alike, and fine-tunes the tempo a little (within 1 BPM) while it is at it.
+
+function alignBars(chroma, bpm, manualStart) {
+  const energies = Array.from(chroma.energy).sort((x, y) => x - y);
+  const floor = energies[Math.floor(energies.length / 2)] * 0.2;
+  const frames = []; // every frame that isn't near-silent, with its note content scaled to a total of 1
+  chroma.frames.forEach((f, i) => {
+    if (chroma.energy[i] < floor) return;
+    const sum = f.reduce((a, b) => a + b, 0) || 1;
+    frames.push({ t: i * chroma.hop + chroma.offset, u: Array.from(f, (v) => v / sum) });
+  });
+  if (frames.length < 8) return null;
+  const total = chroma.frames.length * chroma.hop + chroma.offset;
+
+  let best = null;
+  for (let tempo = bpm - 1; tempo <= bpm + 1.0001; tempo += 0.05) {
+    const barSec = 240 / tempo;
+    const phases = [];
+    if (manualStart === null) for (let p = 0; p < barSec; p += 0.05) phases.push(p);
+    else phases.push(((manualStart % barSec) + barSec) % barSec);
+    const maxBars = Math.ceil(total / barSec) + 2;
+    for (const phase of phases) {
+      const sums = new Float64Array(maxBars * 12);
+      const counts = new Int32Array(maxBars);
+      for (const f of frames) {
+        const b = Math.floor((f.t - phase) / barSec) + 1; // +1 keeps the index from going below zero
+        counts[b]++;
+        for (let k = 0; k < 12; k++) sums[b * 12 + k] += f.u[k];
+      }
+      let score = 0; // higher means the bars are more internally consistent
+      for (let b = 0; b < maxBars; b++) {
+        if (!counts[b]) continue;
+        let sq = 0;
+        for (let k = 0; k < 12; k++) sq += sums[b * 12 + k] ** 2;
+        score += sq / counts[b];
+      }
+      if (!best || score > best.score) best = { score, tempo, phase };
+    }
+  }
+  return best;
+}
+
+// The list of time slices that chords are measured in: fixed slices, or bars if a tempo was given.
+function chordGrid(chroma, winSec) {
+  const total = chroma.frames.length * chroma.hop + chroma.offset;
+  const fixed = (note) => {
+    const grid = [];
+    for (let t = 0; t < total; t += winSec) grid.push({ start: t, len: winSec });
+    return { grid, info: note };
+  };
+  const bpm = Number($("bpm").value);
+  if (!(bpm > 0)) return fixed("");
+
+  const startText = $("barStart").value;
+  const manual = startText === "" ? null : Number(startText) - analysisOffset;
+  const cacheKey = `${bpm}|${manual}`;
+  if (!raw.align || raw.align.key !== cacheKey) raw.align = { key: cacheKey, best: alignBars(chroma, bpm, manual) };
+  const best = raw.align.best;
+  if (!best) return fixed("Couldn't find bar lines, so fixed time slices were used.");
+
+  const barSec = 240 / best.tempo;
+  const step = barSec * Number($("bpmStep").value);
+  const grid = [];
+  for (let t = best.phase - step * Math.ceil(best.phase / step); t < total; t += step) grid.push({ start: t, len: step });
+  const info = `Bar lines every ${barSec.toFixed(2)} s (${best.tempo.toFixed(1)} BPM), one falling at ${(best.phase + analysisOffset).toFixed(1)} s.`;
+  return { grid, info };
+}
+
 function chordsFromAudio(chroma, winSec) {
   const shift = (v) => Array.from(v, (_, i) => v[(((i - transpose) % 12) + 12) % 12]);
   const withSevenths = $("sevenths").checked;
@@ -660,10 +731,10 @@ function chordsFromAudio(chroma, winSec) {
 
   // average the chroma inside each chord window
   const wins = [];
-  const total = chroma.frames.length * chroma.hop;
-  for (let t0 = 0; t0 < total; t0 += winSec) {
+  const { grid, info } = chordGrid(chroma, winSec);
+  for (const { start: t0, len } of grid) {
     const from = Math.max(0, Math.ceil((t0 - chroma.offset) / chroma.hop));
-    const to = Math.min(chroma.frames.length, Math.ceil((t0 + winSec - chroma.offset) / chroma.hop));
+    const to = Math.min(chroma.frames.length, Math.ceil((t0 + len - chroma.offset) / chroma.hop));
     if (to <= from) continue;
     const c = new Float64Array(12);
     const b = new Float64Array(12);
@@ -679,14 +750,14 @@ function chordsFromAudio(chroma, winSec) {
     const sorted = Array.from(c).sort((x, y) => x - y);
     const floor = (sorted[5] + sorted[6]) / 2;
     const cleaned = c.map((v) => Math.max(0, v - floor));
-    wins.push({ time: t0, c: shift(cleaned), b: shift(b), energy: e / (to - from) });
+    wins.push({ time: Math.max(0, t0), c: shift(cleaned), b: shift(b), energy: e / (to - from) });
   }
 
   // drop near-silent windows
   const energies = wins.map((w) => w.energy).sort((x, y) => x - y);
   const median = energies.length ? energies[Math.floor(energies.length / 2)] : 0;
   const active = wins.filter((w) => w.energy >= median * 0.2 && w.c.some((v) => v > 0));
-  if (!active.length) return { chords: [], key: null };
+  if (!active.length) return { chords: [], key: null, info };
 
   // song key from the whole recording
   const sum = new Array(12).fill(0);
@@ -760,7 +831,7 @@ function chordsFromAudio(chroma, winSec) {
     const name = states[path[t]].name;
     if (name !== chords[chords.length - 1]?.chord) chords.push({ time: w.time, chord: name });
   });
-  return { chords, key: useKey ? key : null };
+  return { chords, key: useKey ? key : null, info };
 }
 
 function toChords(notes, windowSec, scale = null) {
@@ -872,6 +943,7 @@ function render() {
   const mode = $("mode").value;
   const winSec = Number($("win").value);
   $("winOut").textContent = `${winSec}s`;
+  $("win").disabled = Number($("bpm").value) > 0; // the tempo decides the chord length when it is set
   $("lenOut").textContent = `${Number($("minLen").value).toFixed(2)}s`;
   $("tOut").textContent = transpose > 0 ? `+${transpose}` : String(transpose);
 
@@ -881,14 +953,16 @@ function render() {
   if (mode !== "tabs") {
     let chords;
     let key;
+    let info = "";
     if ($("chordMethod").value === "audio" && raw.chroma) {
-      ({ chords, key } = chordsFromAudio(raw.chroma, winSec));
+      ({ chords, key, info } = chordsFromAudio(raw.chroma, winSec));
     } else {
       const chordNotes = getNotes("all"); // chords always come from the whole mix, not the picked part
       key = $("inKey").checked ? estimateKey(chordNotes) : null;
       chords = toChords(chordNotes, winSec, key ? key.scale : null);
     }
-    $("keyInfo").textContent = key ? `Detected key: ${key.label}. Chords from this key are favored.` : "";
+    const keyText = key ? `Detected key: ${key.label}. Chords from this key are favored.` : "";
+    $("keyInfo").textContent = [keyText, info].filter(Boolean).join(" ");
     renderChords(chords);
   }
   if (mode !== "chords") {
@@ -975,9 +1049,10 @@ function scheduleRender(delay = 60, busy = false) {
   }, delay);
 }
 
-for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange", "sevenths", "inKey", "part", "chordMethod"]) {
-  // sensitivity re-detects every note, so wait until the slider stops moving
-  $(id).addEventListener("input", () => scheduleRender(id === "sens" ? 350 : 60, id === "sens"));
+for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange", "sevenths", "inKey", "part", "chordMethod", "bpm", "bpmStep", "barStart"]) {
+  // sensitivity re-detects every note and the tempo search is also slow, so wait until typing or sliding stops
+  const slow = id === "sens" || id === "bpm" || id === "barStart";
+  $(id).addEventListener("input", () => scheduleRender(slow ? 350 : 60, slow));
 }
 
 function shift(by) {
