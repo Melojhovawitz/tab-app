@@ -438,6 +438,8 @@ function keyFromWeights(w) {
   return {
     scale: new Set([0, 2, 4, 5, 7, 9, 11].map((i) => (scaleRoot + i) % 12)),
     label: `${NAMES[best.tonic]} ${best.minor ? "minor" : "major"}`,
+    tonic: best.tonic,
+    minor: best.minor,
   };
 }
 
@@ -569,7 +571,14 @@ function chordsFromAudio(chroma, winSec) {
   const sum = new Array(12).fill(0);
   for (const w of active) for (let k = 0; k < 12; k++) sum[k] += w.c[k];
   const key = keyFromWeights(sum);
-  const scale = useKey ? key.scale : null;
+  // Chords that usually belong in a song in this key, written as (steps above the tonic + M or m).
+  // This includes the common borrowed ones (flat seven, minor four, minor five in a major key),
+  // so real chords such as a minor v are not pushed out just because they leave the scale.
+  const allowed = new Set(
+    key.minor
+      ? ["0m", "3M", "5m", "7m", "7M", "8M", "10M"]
+      : ["0M", "2m", "4m", "5M", "7M", "9m", "10M", "5m", "7m", "3M", "8M"]
+  );
 
   // every chord we are willing to name
   const states = [];
@@ -582,7 +591,7 @@ function chordsFromAudio(chroma, winSec) {
         root,
         tones,
         norm: Math.sqrt(tones.length),
-        inKey: !scale || tones.every((t) => scale.has(t)),
+        inKey: !useKey || allowed.has(`${(root - key.tonic + 12) % 12}${shape[1] === 3 ? "m" : "M"}`),
         extra: shape.length > 3,
       });
     }
@@ -595,7 +604,7 @@ function chordsFromAudio(chroma, winSec) {
     let score = dot / (cn * st.norm); // how closely the sound matches this chord shape
     if (st.root === argmax(w.b)) score += 0.06; // the lowest notes agree on the root
     if (!st.inKey) score -= 0.1;
-    if (st.extra) score -= 0.03;
+    if (st.extra) score -= 0.06;
     return score;
   };
 
