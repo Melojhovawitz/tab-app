@@ -186,21 +186,142 @@ function pickPart(notes, part) {
 
 // ---------- notes -> tab ----------
 
+// Chooses a string and fret for every note.
+// Notes that start in the same tab column sound together, so each needs its own string and the whole
+// shape has to fit under one hand. Then the best run of shapes through the whole song is picked,
+// so the hand moves as little as possible.
+const FINGERINGS_KEPT = 14; // best shapes kept per column
+
 function toTab(notes, tuning) {
-  let lastFret = 0;
-  const out = [];
+  const strings = tuning.open.length;
+  const byColumn = new Map();
   for (const n of notes) {
-    const options = [];
-    tuning.open.forEach((open, string) => {
-      const fret = n.pitchMidi - open;
-      if (fret >= 0 && fret <= tuning.maxFret) options.push({ string, fret });
-    });
-    if (!options.length) continue; // outside this instrument's range
-    options.sort((a, b) => Math.abs(a.fret - lastFret) - Math.abs(b.fret - lastFret));
-    lastFret = options[0].fret;
-    out.push({ time: n.startTimeSeconds, ...options[0] });
+    const col = Math.floor(n.startTimeSeconds / TAB_STEP);
+    if (!byColumn.has(col)) byColumn.set(col, []);
+    byColumn.get(col).push(n);
   }
-  return out;
+
+  // 1. For each column, list the playable shapes, best first.
+  const steps = [];
+  for (const col of [...byColumn.keys()].sort((a, b) => a - b)) {
+    const seen = new Set();
+    let group = byColumn
+      .get(col)
+      .sort((a, b) => (b.amplitude || 0) - (a.amplitude || 0))
+      .filter((n) => !seen.has(n.pitchMidi) && seen.add(n.pitchMidi))
+      .map((note) => ({
+        note,
+        options: tuning.open
+          .map((open, string) => ({ string, fret: note.pitchMidi - open }))
+          .filter((o) => o.fret >= 0 && o.fret <= tuning.maxFret),
+      }))
+      .filter((item) => item.options.length) // notes this instrument can't reach are left out
+      .slice(0, strings);
+    let candidates = [];
+    while (group.length) {
+      candidates = fingerings(group, tuning.open);
+      if (candidates.length) break;
+      group = group.slice(0, -1); // they won't fit on separate strings, so drop the quietest note
+    }
+    if (candidates.length) steps.push({ col, group, candidates });
+  }
+  if (!steps.length) return [];
+
+  // 2. Pick one shape per column so that the total cost, including hand movement, is lowest.
+  const total = steps.map((st) => st.candidates.map((c) => c.cost));
+  const back = steps.map((st) => new Array(st.candidates.length).fill(0));
+  for (let t = 1; t < steps.length; t++) {
+    const gap = (steps[t].col - steps[t - 1].col) * TAB_STEP;
+    steps[t].candidates.forEach((cur, j) => {
+      let bestCost = Infinity;
+      let bestI = 0;
+      steps[t - 1].candidates.forEach((prev, i) => {
+        const c = total[t - 1][i] + transitionCost(prev, cur, gap);
+        if (c < bestCost) {
+          bestCost = c;
+          bestI = i;
+        }
+      });
+      total[t][j] += bestCost;
+      back[t][j] = bestI;
+    });
+  }
+  let pick = 0;
+  const last = steps.length - 1;
+  total[last].forEach((c, j) => {
+    if (c < total[last][pick]) pick = j;
+  });
+
+  const out = [];
+  for (let t = last; t >= 0; t--) {
+    const shape = steps[t].candidates[pick];
+    steps[t].group.forEach((item, i) => {
+      out.push({ time: item.note.startTimeSeconds, string: shape.picks[i].string, fret: shape.picks[i].fret });
+    });
+    pick = back[t][pick];
+  }
+  return out.sort((a, b) => a.time - b.time || a.string - b.string);
+}
+
+// Every way to put the notes on different strings, cheapest first.
+function fingerings(group, open) {
+  const picks = [];
+  const used = new Set();
+  const found = [];
+  const visit = (i) => {
+    if (i === group.length) {
+      found.push(scoreFingering(group, picks, open));
+      return;
+    }
+    for (const o of group[i].options) {
+      if (used.has(o.string)) continue;
+      used.add(o.string);
+      picks.push(o);
+      visit(i + 1);
+      picks.pop();
+      used.delete(o.string);
+    }
+  };
+  visit(0);
+  found.sort((a, b) => a.cost - b.cost);
+  return found.slice(0, FINGERINGS_KEPT);
+}
+
+function scoreFingering(group, picks, open) {
+  const fretted = picks.filter((p) => p.fret > 0).map((p) => p.fret);
+  const span = fretted.length > 1 ? Math.max(...fretted) - Math.min(...fretted) : 0;
+  let cost = Math.max(0, span - 3) * 1.2 + (span > 5 ? 2 : 0); // a hand covers about four frets
+  for (const p of picks) {
+    if (p.fret === 0) cost -= 0.1; // open strings are easy
+    else cost += p.fret * 0.03 + Math.max(0, p.fret - 12) * 0.15; // low frets are easier than very high ones
+  }
+  // a higher note shouldn't sit on a lower-sounding string than a lower note
+  for (let a = 0; a < picks.length; a++) {
+    for (let b = a + 1; b < picks.length; b++) {
+      const pitchDiff = group[a].note.pitchMidi - group[b].note.pitchMidi;
+      const stringDiff = open[picks[a].string] - open[picks[b].string];
+      if (pitchDiff * stringDiff < 0) cost += 2;
+    }
+  }
+  return {
+    picks: picks.map((p) => ({ ...p })),
+    cost,
+    hand: fretted.length ? fretted.reduce((sum, f) => sum + f, 0) / fretted.length : null,
+    at: new Map(group.map((g, i) => [g.note.pitchMidi, `${picks[i].string}:${picks[i].fret}`])),
+  };
+}
+
+// Cost of moving from one shape to the next: moving the hand, and playing the same note in a different place.
+function transitionCost(a, b, gapSeconds) {
+  let cost = 0;
+  if (a.hand !== null && b.hand !== null) {
+    cost += Math.abs(a.hand - b.hand) * 0.35 * (gapSeconds > 1 ? 0.4 : 1); // after a rest the hand can reposition
+  }
+  for (const [pitch, place] of b.at) {
+    const before = a.at.get(pitch);
+    if (before !== undefined && before !== place) cost += 0.8;
+  }
+  return cost;
 }
 
 function fmtTime(t) {
