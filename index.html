@@ -196,6 +196,19 @@
           <option value="notes">Detected notes</option>
         </select>
       </label>
+      <label>Tempo (BPM) <small>optional</small>
+        <input type="number" id="bpm" min="40" max="240" step="0.1" placeholder="e.g. 101" />
+      </label>
+      <label>Change chords every
+        <select id="bpmStep">
+          <option value="1">1 bar</option>
+          <option value="0.5">Half a bar</option>
+          <option value="0.25">1 beat</option>
+        </select>
+      </label>
+      <label>First bar line at (seconds) <small>blank = find it</small>
+        <input type="number" id="barStart" min="0" step="0.1" placeholder="auto" />
+      </label>
       <label class="check">
         <input type="checkbox" id="inKey" checked />
         Favor the song's key
