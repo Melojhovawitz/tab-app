@@ -72,7 +72,10 @@ async function runModel(file) {
       $("bar").value = Math.round(p * 100);
     }
   );
-  return { frames, onsets };
+  setStatus("Reading the chords from the audio…");
+  await new Promise((r) => setTimeout(r, 30)); // lets the page repaint first
+  const chroma = computeChroma(audio);
+  return { frames, onsets, chroma };
 }
 
 let baseNotes = null; // detected notes for the current sensitivity, reused by every other control
@@ -387,7 +390,7 @@ function detectChord(windowNotes, scale = null) {
       // A 7th chord always scores at least as high as its plain triad, because it only adds one more
       // note and any stray sound in the mix lands on that note. The penalty means the extra note has
       // to be clearly present before the 7th chord wins.
-      const complexity = shape.length > 3 ? total * 0.2 : 0;
+      const complexity = shape.length > 3 ? total * 0.3 : 0;
       // Chords built only from the song's key get a head start. Others can still win, but the notes
       // have to be clearly present, so real borrowed chords are not blocked outright.
       const outOfKey = scale && !shape.every((i) => scale.has((root + i) % 12)) ? total * 0.25 : 0;
@@ -395,7 +398,8 @@ function detectChord(windowNotes, scale = null) {
       if (score > best.score) best = { score, name: NAMES[root] + suffix };
     }
   }
-  return best.name;
+  // If nothing fits well (a quiet or sparse moment), name no chord and let the previous one carry on.
+  return best.score >= total * 0.4 ? best.name : null;
 }
 
 // Krumhansl-Schmuckler key finding: compares how much each note is used against typical
@@ -407,7 +411,10 @@ function estimateKey(notes) {
   if (!notes.length) return null;
   const w = new Array(12).fill(0);
   for (const n of notes) w[((n.pitchMidi % 12) + 12) % 12] += n.durationSeconds * n.amplitude;
+  return keyFromWeights(w);
+}
 
+function keyFromWeights(w) {
   const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
   const mw = mean(w);
   let best = null;
@@ -432,6 +439,198 @@ function estimateKey(notes) {
     scale: new Set([0, 2, 4, 5, 7, 9, 11].map((i) => (scaleRoot + i) % 12)),
     label: `${NAMES[best.tonic]} ${best.minor ? "minor" : "major"}`,
   };
+}
+
+// ---------- chords from the audio itself ----------
+// Instead of listening for single notes, this measures how much of each of the 12 note names
+// (C, C#, D ...) is present in the sound over time, then matches that to chord shapes.
+
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wr = Math.cos(ang);
+    const wi = Math.sin(ang);
+    const half = len / 2;
+    for (let i = 0; i < n; i += len) {
+      let cr = 1;
+      let ci = 0;
+      for (let k = 0; k < half; k++) {
+        const a = i + k;
+        const b = a + half;
+        const vr = re[b] * cr - im[b] * ci;
+        const vi = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - vr;
+        im[b] = im[a] - vi;
+        re[a] += vr;
+        im[a] += vi;
+        const nr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr;
+        cr = nr;
+      }
+    }
+  }
+}
+
+function computeChroma(audio, sr = 22050) {
+  const N = 8192;
+  const hop = 4096;
+  const half = N / 2;
+  const hann = new Float64Array(N);
+  for (let i = 0; i < N; i++) hann[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1));
+
+  // Which note name each frequency bin belongs to, and which bins count as "bass".
+  const pcOfBin = new Int8Array(half).fill(-1);
+  const isBass = new Uint8Array(half);
+  for (let k = 1; k < half; k++) {
+    const f = (k * sr) / N;
+    if (f < 65 || f > 1800) continue;
+    pcOfBin[k] = (((Math.round(69 + 12 * Math.log2(f / 440)) % 12) + 12) % 12);
+    isBass[k] = f <= 260 ? 1 : 0;
+  }
+
+  const frames = [];
+  const bass = [];
+  const energy = [];
+  const re = new Float64Array(N);
+  const im = new Float64Array(N);
+  for (let start = 0; start + N <= audio.length; start += hop) {
+    for (let i = 0; i < N; i++) {
+      re[i] = audio[start + i] * hann[i];
+      im[i] = 0;
+    }
+    fft(re, im);
+    const c = new Float32Array(12);
+    const b = new Float32Array(12);
+    let e = 0;
+    for (let k = 1; k < half; k++) {
+      const pc = pcOfBin[k];
+      if (pc < 0) continue;
+      const m = Math.pow(Math.hypot(re[k], im[k]), 0.6); // compress so loud notes don't drown the rest
+      c[pc] += m;
+      if (isBass[k]) b[pc] += m;
+      e += m;
+    }
+    frames.push(c);
+    bass.push(b);
+    energy.push(e);
+  }
+  return { frames, bass, energy, hop: hop / sr, offset: N / 2 / sr };
+}
+
+const CHANGE_COST = 0.15; // how much a chord change has to be worth, so the result doesn't flicker
+
+function chordsFromAudio(chroma, winSec) {
+  const shift = (v) => Array.from(v, (_, i) => v[(((i - transpose) % 12) + 12) % 12]);
+  const withSevenths = $("sevenths").checked;
+  const useKey = $("inKey").checked;
+  const argmax = (v) => v.reduce((best, x, i) => (x > v[best] ? i : best), 0);
+
+  // average the chroma inside each chord window
+  const wins = [];
+  const total = chroma.frames.length * chroma.hop;
+  for (let t0 = 0; t0 < total; t0 += winSec) {
+    const from = Math.max(0, Math.ceil((t0 - chroma.offset) / chroma.hop));
+    const to = Math.min(chroma.frames.length, Math.ceil((t0 + winSec - chroma.offset) / chroma.hop));
+    if (to <= from) continue;
+    const c = new Float64Array(12);
+    const b = new Float64Array(12);
+    let e = 0;
+    for (let i = from; i < to; i++) {
+      for (let k = 0; k < 12; k++) {
+        c[k] += chroma.frames[i][k];
+        b[k] += chroma.bass[i][k];
+      }
+      e += chroma.energy[i];
+    }
+    // remove the flat background (drums, noise) by subtracting the median of the 12 values
+    const sorted = Array.from(c).sort((x, y) => x - y);
+    const floor = (sorted[5] + sorted[6]) / 2;
+    const cleaned = c.map((v) => Math.max(0, v - floor));
+    wins.push({ time: t0, c: shift(cleaned), b: shift(b), energy: e / (to - from) });
+  }
+
+  // drop near-silent windows
+  const energies = wins.map((w) => w.energy).sort((x, y) => x - y);
+  const median = energies.length ? energies[Math.floor(energies.length / 2)] : 0;
+  const active = wins.filter((w) => w.energy >= median * 0.2 && w.c.some((v) => v > 0));
+  if (!active.length) return { chords: [], key: null };
+
+  // song key from the whole recording
+  const sum = new Array(12).fill(0);
+  for (const w of active) for (let k = 0; k < 12; k++) sum[k] += w.c[k];
+  const key = keyFromWeights(sum);
+  const scale = useKey ? key.scale : null;
+
+  // every chord we are willing to name
+  const states = [];
+  for (let root = 0; root < 12; root++) {
+    for (const [suffix, shape] of Object.entries(SHAPES)) {
+      if (shape.length > 3 && !withSevenths) continue;
+      const tones = shape.map((i) => (root + i) % 12);
+      states.push({
+        name: NAMES[root] + suffix,
+        root,
+        tones,
+        norm: Math.sqrt(tones.length),
+        inKey: !scale || tones.every((t) => scale.has(t)),
+        extra: shape.length > 3,
+      });
+    }
+  }
+
+  const emit = (w, st) => {
+    const cn = Math.hypot(...w.c) || 1;
+    let dot = 0;
+    for (const t of st.tones) dot += w.c[t];
+    let score = dot / (cn * st.norm); // how closely the sound matches this chord shape
+    if (st.root === argmax(w.b)) score += 0.06; // the lowest notes agree on the root
+    if (!st.inKey) score -= 0.1;
+    if (st.extra) score -= 0.03;
+    return score;
+  };
+
+  // pick the best path through time, so one odd window doesn't flip the chord
+  const T = active.length;
+  const S = states.length;
+  const back = Array.from({ length: T }, () => new Int16Array(S));
+  let prev = Float64Array.from(states, (st) => emit(active[0], st));
+  for (let t = 1; t < T; t++) {
+    let bestPrev = 0;
+    for (let s = 1; s < S; s++) if (prev[s] > prev[bestPrev]) bestPrev = s;
+    const cur = new Float64Array(S);
+    for (let s = 0; s < S; s++) {
+      const stay = prev[s];
+      const jump = prev[bestPrev] - CHANGE_COST;
+      const from = stay >= jump ? s : bestPrev;
+      cur[s] = Math.max(stay, jump) + emit(active[t], states[s]);
+      back[t][s] = from;
+    }
+    prev = cur;
+  }
+  let s = 0;
+  for (let i = 1; i < S; i++) if (prev[i] > prev[s]) s = i;
+  const path = new Array(T);
+  for (let t = T - 1; t >= 0; t--) {
+    path[t] = s;
+    s = back[t][s];
+  }
+
+  const chords = [];
+  active.forEach((w, t) => {
+    const name = states[path[t]].name;
+    if (name !== chords[chords.length - 1]?.chord) chords.push({ time: w.time, chord: name });
+  });
+  return { chords, key: useKey ? key : null };
 }
 
 function toChords(notes, windowSec, scale = null) {
@@ -550,10 +749,17 @@ function render() {
   $("tabBox").hidden = mode === "chords";
 
   if (mode !== "tabs") {
-    const chordNotes = getNotes("all"); // chords always come from the whole mix, not the picked part
-    const key = $("inKey").checked ? estimateKey(chordNotes) : null;
+    let chords;
+    let key;
+    if ($("chordMethod").value === "audio" && raw.chroma) {
+      ({ chords, key } = chordsFromAudio(raw.chroma, winSec));
+    } else {
+      const chordNotes = getNotes("all"); // chords always come from the whole mix, not the picked part
+      key = $("inKey").checked ? estimateKey(chordNotes) : null;
+      chords = toChords(chordNotes, winSec, key ? key.scale : null);
+    }
     $("keyInfo").textContent = key ? `Detected key: ${key.label}. Chords from this key are favored.` : "";
-    renderChords(toChords(chordNotes, winSec, key ? key.scale : null));
+    renderChords(chords);
   }
   if (mode !== "chords") {
     $("partInfo").textContent = PART_INFO[$("part").value];
@@ -639,7 +845,7 @@ function scheduleRender(delay = 60, busy = false) {
   }, delay);
 }
 
-for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange", "sevenths", "inKey", "part"]) {
+for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange", "sevenths", "inKey", "part", "chordMethod"]) {
   // sensitivity re-detects every note, so wait until the slider stops moving
   $(id).addEventListener("input", () => scheduleRender(id === "sens" ? 350 : 60, id === "sens"));
 }
