@@ -758,6 +758,39 @@ function chordGrid(chroma, winSec) {
   return { grid, info };
 }
 
+// A bar that doesn't look like one chord may really hold two or four: in busier parts of a song the bass
+// often moves every beat. So when a bar doesn't fit any chord well, it is split into halves or beats,
+// but only if the pieces fit chords clearly better than the whole bar did.
+const SPLIT_BELOW = 0.68;
+const SPLIT_GAIN = 0.08;
+
+function triadFit(c) {
+  const norm = Math.hypot(...c) || 1;
+  let best = 0;
+  for (let r = 0; r < 12; r++) {
+    best = Math.max(best, (c[r] + c[(r + 4) % 12] + c[(r + 7) % 12]) / (norm * Math.sqrt(3)));
+    best = Math.max(best, (c[r] + c[(r + 3) % 12] + c[(r + 7) % 12]) / (norm * Math.sqrt(3)));
+  }
+  return best;
+}
+
+function splitIfUnclear(whole, start, len, build) {
+  const fit0 = triadFit(whole.c);
+  if (fit0 >= SPLIT_BELOW || len < 1.5) return [whole];
+  let best = { parts: [whole], fit: fit0 };
+  for (const pieces of [2, 4]) {
+    const parts = [];
+    for (let q = 0; q < pieces; q++) {
+      const w = build(start + (q * len) / pieces, len / pieces);
+      if (w) parts.push(w);
+    }
+    if (parts.length < pieces) continue;
+    const fit = parts.reduce((sum, w) => sum + triadFit(w.c), 0) / parts.length;
+    if (fit > best.fit + SPLIT_GAIN) best = { parts, fit };
+  }
+  return best.parts;
+}
+
 function chordsFromAudio(chroma, winSec) {
   const shift = (v) => Array.from(v, (_, i) => v[(((i - transpose) % 12) + 12) % 12]);
   const withSevenths = $("sevenths").checked;
@@ -767,10 +800,12 @@ function chordsFromAudio(chroma, winSec) {
   // average the chroma inside each chord window
   const wins = [];
   const { grid, info } = chordGrid(chroma, winSec);
-  for (const { start: t0, len } of grid) {
+
+  // the note-name content of one stretch of time (null where there is nothing analysed)
+  const build = (t0, len) => {
     const from = Math.max(0, Math.ceil((t0 - chroma.offset) / chroma.hop));
     const to = Math.min(chroma.frames.length, Math.ceil((t0 + len - chroma.offset) / chroma.hop));
-    if (to <= from) continue;
+    if (to <= from) return null;
     const c = new Float64Array(12);
     const b = new Float64Array(12);
     let e = 0;
@@ -785,7 +820,12 @@ function chordsFromAudio(chroma, winSec) {
     const sorted = Array.from(c).sort((x, y) => x - y);
     const floor = (sorted[5] + sorted[6]) / 2;
     const cleaned = c.map((v) => Math.max(0, v - floor));
-    wins.push({ time: Math.max(0, t0), c: shift(cleaned), b: shift(b), energy: e / (to - from) });
+    return { time: Math.max(0, t0), c: shift(cleaned), b: shift(b), energy: e / (to - from) };
+  };
+
+  for (const { start: t0, len } of grid) {
+    const whole = build(t0, len);
+    if (whole) wins.push(...splitIfUnclear(whole, t0, len, build));
   }
 
   // drop near-silent windows
@@ -870,11 +910,12 @@ function chordsFromAudio(chroma, winSec) {
   const chords = [];
   let unclear = 0;
   active.forEach((w, t) => {
-    const name = w.fit >= MIN_FIT ? states[path[t]].name : "?"; // "?" where no chord fits well
-    if (name === "?") unclear++;
-    if (name !== chords[chords.length - 1]?.chord) chords.push({ time: w.time, chord: name });
+    const name = states[path[t]].name;
+    const unsure = w.fit < MIN_FIT; // the best chord is still named, just shown lighter
+    if (unsure) unclear++;
+    if (name !== chords[chords.length - 1]?.chord) chords.push({ time: w.time, chord: name, unsure });
   });
-  const note = unclear ? `${unclear} of ${active.length} sections are marked "?" because the sound there isn't clearly one chord.` : "";
+  const note = unclear ? `${unclear} of ${active.length} sections are less certain and shown lighter.` : "";
   return { chords, key: useKey ? key : null, info: [info, note].filter(Boolean).join(" ") };
 }
 
@@ -899,7 +940,8 @@ function renderChords(list) {
   }
   for (const c of list) {
     const chip = document.createElement("div");
-    chip.className = "chip";
+    chip.className = c.unsure ? "chip unsure" : "chip";
+    if (c.unsure) chip.title = "Less certain: the sound here isn't clearly one chord";
     const name = document.createElement("b");
     name.textContent = c.chord;
     const time = document.createElement("small");
