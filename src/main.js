@@ -604,26 +604,42 @@ function fft(re, im) {
   }
 }
 
+// Steady notes are kept and drum hits and noise are removed before the note names are measured.
+// This matters a lot on real recordings: with everything left in, every note name looks about equally
+// strong and the chord is close to a coin flip.
+function medianOf(a) {
+  for (let i = 1; i < a.length; i++) {
+    const v = a[i];
+    let j = i - 1;
+    while (j >= 0 && a[j] > v) {
+      a[j + 1] = a[j];
+      j--;
+    }
+    a[j + 1] = v;
+  }
+  return a[a.length >> 1];
+}
+
 function computeChroma(audio, sr = 22050) {
   const N = 8192;
   const hop = 4096;
-  const half = N / 2;
   const hann = new Float64Array(N);
   for (let i = 0; i < N; i++) hann[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1));
 
-  // Which note name each frequency bin belongs to, and which bins count as "bass".
-  const pcOfBin = new Int8Array(half).fill(-1);
-  const isBass = new Uint8Array(half);
-  for (let k = 1; k < half; k++) {
-    const f = (k * sr) / N;
-    if (f < 65 || f > 1800) continue;
-    pcOfBin[k] = (((Math.round(69 + 12 * Math.log2(f / 440)) % 12) + 12) % 12);
-    isBass[k] = f <= 260 ? 1 : 0;
+  // Only the range where chords live (above that it is mostly voice overtones and cymbals).
+  const kLo = Math.ceil((65 * N) / sr);
+  const kHi = Math.floor((1200 * N) / sr);
+  const nb = kHi - kLo + 1;
+  const pcOfBin = new Int8Array(nb);
+  const isBass = new Uint8Array(nb);
+  for (let j = 0; j < nb; j++) {
+    const f = ((kLo + j) * sr) / N;
+    pcOfBin[j] = (((Math.round(69 + 12 * Math.log2(f / 440)) % 12) + 12) % 12);
+    isBass[j] = f <= 260 ? 1 : 0;
   }
 
-  const frames = [];
-  const bass = [];
-  const energy = [];
+  // 1. the spectrum of every frame
+  const spectra = [];
   const re = new Float64Array(N);
   const im = new Float64Array(N);
   for (let start = 0; start + N <= audio.length; start += hop) {
@@ -632,15 +648,33 @@ function computeChroma(audio, sr = 22050) {
       im[i] = 0;
     }
     fft(re, im);
+    const m = new Float32Array(nb);
+    for (let j = 0; j < nb; j++) m[j] = Math.hypot(re[kLo + j], im[kLo + j]);
+    spectra.push(m);
+  }
+
+  // 2. keep the steady part of each spectrum, then add it up per note name.
+  // A sound is "steady" if it is as strong as the same frequency in the neighbouring frames,
+  // and "a hit" if it is as strong as the neighbouring frequencies in the same frame.
+  const T = spectra.length;
+  const frames = [];
+  const bass = [];
+  const energy = [];
+  const overTime = new Float32Array(5);
+  const overFreq = new Float32Array(9);
+  for (let i = 0; i < T; i++) {
+    const cur = spectra[i];
     const c = new Float32Array(12);
     const b = new Float32Array(12);
     let e = 0;
-    for (let k = 1; k < half; k++) {
-      const pc = pcOfBin[k];
-      if (pc < 0) continue;
-      const m = Math.pow(Math.hypot(re[k], im[k]), 0.6); // compress so loud notes don't drown the rest
-      c[pc] += m;
-      if (isBass[k]) b[pc] += m;
+    for (let j = 0; j < nb; j++) {
+      for (let q = 0; q < 5; q++) overTime[q] = spectra[Math.min(T - 1, Math.max(0, i + q - 2))][j];
+      const steady = medianOf(overTime);
+      for (let q = 0; q < 9; q++) overFreq[q] = cur[Math.min(nb - 1, Math.max(0, j + q - 4))];
+      const hit = medianOf(overFreq);
+      const m = (cur[j] * steady * steady) / (steady * steady + hit * hit + 1e-12);
+      c[pcOfBin[j]] += m;
+      if (isBass[j]) b[pcOfBin[j]] += m;
       e += m;
     }
     frames.push(c);
@@ -650,6 +684,7 @@ function computeChroma(audio, sr = 22050) {
   return { frames, bass, energy, hop: hop / sr, offset: N / 2 / sr };
 }
 
+const MIN_FIT = 0.65; // below this the sound doesn't clearly match any chord
 const CHANGE_COST = 0.15; // how much a chord change has to be worth, so the result doesn't flicker
 
 // ---------- lining chords up with the bars ----------
@@ -789,16 +824,22 @@ function chordsFromAudio(chroma, winSec) {
     }
   }
 
-  const emit = (w, st) => {
+  const cosine = (w, st) => {
     const cn = Math.hypot(...w.c) || 1;
     let dot = 0;
     for (const t of st.tones) dot += w.c[t];
-    let score = dot / (cn * st.norm); // how closely the sound matches this chord shape
+    return dot / (cn * st.norm); // how closely the sound matches this chord shape
+  };
+  const emit = (w, st) => {
+    let score = cosine(w, st);
     if (st.root === argmax(w.b)) score += 0.06; // the lowest notes agree on the root
     if (!st.inKey) score -= 0.1;
     if (st.extra) score -= 0.06;
     return score;
   };
+
+  // how well does the best chord fit each window? Where nothing fits, the sound is not clearly one chord.
+  for (const w of active) w.fit = Math.max(...states.map((st) => cosine(w, st)));
 
   // pick the best path through time, so one odd window doesn't flip the chord
   const T = active.length;
@@ -827,11 +868,14 @@ function chordsFromAudio(chroma, winSec) {
   }
 
   const chords = [];
+  let unclear = 0;
   active.forEach((w, t) => {
-    const name = states[path[t]].name;
+    const name = w.fit >= MIN_FIT ? states[path[t]].name : "?"; // "?" where no chord fits well
+    if (name === "?") unclear++;
     if (name !== chords[chords.length - 1]?.chord) chords.push({ time: w.time, chord: name });
   });
-  return { chords, key: useKey ? key : null, info };
+  const note = unclear ? `${unclear} of ${active.length} sections are marked "?" because the sound there isn't clearly one chord.` : "";
+  return { chords, key: useKey ? key : null, info: [info, note].filter(Boolean).join(" ") };
 }
 
 function toChords(notes, windowSec, scale = null) {
