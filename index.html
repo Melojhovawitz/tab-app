@@ -200,8 +200,12 @@
       <label>Tempo (BPM) <small>optional</small>
         <input type="number" id="bpm" min="40" max="240" step="0.1" placeholder="e.g. 101" />
       </label>
+      <label>Beats per bar
+        <input type="number" id="beats" min="1" max="12" step="1" value="4" />
+      </label>
       <label>Change chords every
         <select id="bpmStep">
+          <option value="0">Automatic</option>
           <option value="1">1 bar</option>
           <option value="0.5">Half a bar</option>
           <option value="0.25">1 beat</option>
