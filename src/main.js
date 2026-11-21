@@ -35,18 +35,28 @@ async function decodeMono(file) {
     const data = buf.getChannelData(c);
     for (let i = 0; i < data.length; i++) mono[i] += data[i] / buf.numberOfChannels;
   }
+  // left minus right: what is not in the middle of the stereo picture
+  let side = null;
+  if (buf.numberOfChannels >= 2) {
+    const left = buf.getChannelData(0);
+    const right = buf.getChannelData(1);
+    side = new Float32Array(buf.length);
+    for (let i = 0; i < side.length; i++) side[i] = (left[i] - right[i]) / 2;
+  }
   ctx.close();
-  return mono;
+  return { mono, side };
 }
 
 async function runModel(file) {
-  const full = await decodeMono(file);
+  const decoded = await decodeMono(file);
+  const full = decoded.mono;
   const startSec = Math.max(0, Number($("startAt").value) || 0);
   const lenSec = Number($("lenSel").value); // 0 means the whole song
   const from = Math.floor(startSec * 22050);
   if (from >= full.length - 22050) throw new Error("range");
   const to = lenSec > 0 ? Math.min(full.length, from + lenSec * 22050) : full.length;
   const audio = full.subarray(from, to);
+  const sideAudio = decoded.side ? decoded.side.subarray(from, to) : null;
   analysisOffset = from / 22050;
   await tf.ready();
   const gpu = tf.getBackend() === "webgl";
@@ -74,7 +84,7 @@ async function runModel(file) {
   );
   setStatus("Reading the chords from the audio…");
   await new Promise((r) => setTimeout(r, 30)); // lets the page repaint first
-  const chroma = computeChroma(audio);
+  const chroma = mixSide(computeChroma(audio), audio, sideAudio);
   return { frames, onsets, chroma };
 }
 
@@ -685,6 +695,34 @@ function computeChroma(audio, sr = 22050) {
 }
 
 const MIN_FIT = 0.65; // below this the sound doesn't clearly match any chord
+// Singers and kick drums sit in the middle of a stereo mix, while guitars, pianos and synth pads are often
+// spread to the sides. So when the two channels differ enough, the left-minus-right signal is measured too
+// and mixed in, which makes the voice smaller next to the instruments. A near-mono file has nothing there.
+function mixSide(chroma, mid, side) {
+  if (!side) return chroma;
+  const rms = (a) => {
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) sum += a[i] * a[i];
+    return Math.sqrt(sum / Math.max(1, a.length));
+  };
+  const ratio = rms(side) / Math.max(rms(mid), 1e-9);
+  const weight = Math.max(0, Math.min(1, (ratio - 0.25) / 0.1)); // 0 below a quarter, full strength from 0.35
+  if (weight === 0) return chroma;
+  const sideChroma = computeChroma(side);
+  const total = (c) => c.energy.reduce((a, b) => a + b, 0);
+  const scale = (weight * total(chroma)) / Math.max(total(sideChroma), 1e-9); // same overall loudness as the middle
+  const n = Math.min(chroma.frames.length, sideChroma.frames.length);
+  for (let i = 0; i < n; i++) {
+    for (let k = 0; k < 12; k++) {
+      chroma.frames[i][k] += scale * sideChroma.frames[i][k];
+      chroma.bass[i][k] += scale * sideChroma.bass[i][k];
+    }
+    chroma.energy[i] += scale * sideChroma.energy[i];
+  }
+  return chroma;
+}
+
+const QUALITY_PRIOR = 0.2;
 const CHANGE_COST = 0.15; // how much a chord change has to be worth, so the result doesn't flicker
 
 // ---------- lining chords up with the bars ----------
@@ -692,7 +730,7 @@ const CHANGE_COST = 0.15; // how much a chord change has to be worth, so the res
 // Given the tempo, this finds where the bar lines fall by looking for the alignment where the sound
 // inside each bar is most alike, and fine-tunes the tempo a little (within 1 BPM) while it is at it.
 
-function alignBars(chroma, bpm, manualStart) {
+function alignBars(chroma, bpm, manualStart, beats = 4) {
   const energies = Array.from(chroma.energy).sort((x, y) => x - y);
   const floor = energies[Math.floor(energies.length / 2)] * 0.2;
   const frames = []; // every frame that isn't near-silent, with its note content scaled to a total of 1
@@ -706,7 +744,7 @@ function alignBars(chroma, bpm, manualStart) {
 
   let best = null;
   for (let tempo = bpm - 1; tempo <= bpm + 1.0001; tempo += 0.05) {
-    const barSec = 240 / tempo;
+    const barSec = (beats * 60) / tempo;
     const phases = [];
     if (manualStart === null) for (let p = 0; p < barSec; p += 0.05) phases.push(p);
     else phases.push(((manualStart % barSec) + barSec) % barSec);
@@ -745,23 +783,80 @@ function chordGrid(chroma, winSec) {
 
   const startText = $("barStart").value;
   const manual = startText === "" ? null : Number(startText) - analysisOffset;
-  const cacheKey = `${bpm}|${manual}`;
-  if (!raw.align || raw.align.key !== cacheKey) raw.align = { key: cacheKey, best: alignBars(chroma, bpm, manual) };
+  const beats = Math.max(1, Number($("beats").value) || 4);
+  const cacheKey = `${bpm}|${manual}|${beats}`;
+  if (!raw.align || raw.align.key !== cacheKey) raw.align = { key: cacheKey, best: alignBars(chroma, bpm, manual, beats) };
   const best = raw.align.best;
   if (!best) return fixed("Couldn't find bar lines, so fixed time slices were used.");
 
-  const barSec = 240 / best.tempo;
-  const step = barSec * Number($("bpmStep").value);
+  const barSec = (beats * 60) / best.tempo;
+  let fraction = Number($("bpmStep").value);
+  if (!fraction) fraction = barSec > 5.2 ? 0.25 : barSec > 2.6 ? 0.5 : 1; // automatic: keep slices at about 2.6 seconds or less
+  const step = barSec * fraction;
   const grid = [];
   for (let t = best.phase - step * Math.ceil(best.phase / step); t < total; t += step) grid.push({ start: t, len: step });
   const info = `Bar lines every ${barSec.toFixed(2)} s (${best.tempo.toFixed(1)} BPM), one falling at ${(best.phase + analysisOffset).toFixed(1)} s.`;
   return { grid, info };
 }
 
+// Many songs repeat the same chords over and over while the voice and lead line change every time.
+// So each bar borrows some of the evidence from the bars one loop earlier and later, which cancels out
+// whatever is different about this particular pass. Bars that fit a chord clearly count for more.
+const REPEAT_BLEND = 0.7;
+const REPEAT_REACH = 2;
+const REPEAT_AGREE = 0.6;
+
+function repeatVote(active, E, step) {
+  if (!step) return E;
+  const whole = (w) => Math.abs(w.len - step) < step * 0.1;
+  const at = new Map();
+  active.forEach((w, t) => {
+    if (whole(w)) at.set(Math.round((w.start - active.find(whole).start) / step), t);
+  });
+  if (at.size < 16) return E;
+  const argmax = (row) => row.reduce((b, v, i) => (v > row[b] ? i : b), 0);
+  const label = (t) => argmax(E[t]);
+
+  // find the loop length (in bars): the spacing at which the same chord keeps coming back
+  let best = { L: 0, score: 0 };
+  for (let L = 2; L <= 32; L++) {
+    let agree = 0;
+    let total = 0;
+    for (const [idx, t] of at) {
+      const u = at.get(idx + L);
+      if (u === undefined) continue;
+      total++;
+      if (label(t) === label(u)) agree++;
+    }
+    if (total >= 8 && agree / total > best.score + 0.03) best = { L, score: agree / total };
+  }
+  if (best.L === 0) return E; // nothing repeats
+
+  const out = E.map((row) => Float64Array.from(row));
+  for (const [idx, t] of at) {
+    const sum = new Float64Array(E[t].length);
+    let weight = 0;
+    const votes = new Map(); // which chord each earlier or later pass of the loop settled on
+    for (let m = -REPEAT_REACH; m <= REPEAT_REACH; m++) {
+      if (m === 0) continue;
+      const u = at.get(idx + m * best.L);
+      if (u === undefined) continue;
+      const wgt = Math.max(active[u].fit, 0) ** 2;
+      weight += wgt;
+      votes.set(label(u), (votes.get(label(u)) || 0) + wgt);
+      for (let s = 0; s < sum.length; s++) sum[s] += wgt * E[u][s];
+    }
+    // only borrow when the other passes agree with each other; where the song does something new they won't
+    if (!weight || Math.max(...votes.values()) / weight < REPEAT_AGREE) continue;
+    for (let s = 0; s < sum.length; s++) out[t][s] = (1 - REPEAT_BLEND) * E[t][s] + REPEAT_BLEND * (sum[s] / weight);
+  }
+  return out;
+}
+
 // A bar that doesn't look like one chord may really hold two or four: in busier parts of a song the bass
 // often moves every beat. So when a bar doesn't fit any chord well, it is split into halves or beats,
 // but only if the pieces fit chords clearly better than the whole bar did.
-const SPLIT_BELOW = 0.68;
+const SPLIT_BELOW = 0; // 0 turns splitting off: on Songsterr's 60 bars it made the chords slightly worse (74% against 78%)
 const SPLIT_GAIN = 0.08;
 
 function triadFit(c) {
@@ -820,7 +915,7 @@ function chordsFromAudio(chroma, winSec) {
     const sorted = Array.from(c).sort((x, y) => x - y);
     const floor = (sorted[5] + sorted[6]) / 2;
     const cleaned = c.map((v) => Math.max(0, v - floor));
-    return { time: Math.max(0, t0), c: shift(cleaned), b: shift(b), energy: e / (to - from) };
+    return { time: Math.max(0, t0), start: t0, len, c: shift(cleaned), b: shift(b), energy: e / (to - from) };
   };
 
   for (const { start: t0, len } of grid) {
@@ -856,6 +951,7 @@ function chordsFromAudio(chroma, winSec) {
       states.push({
         name: NAMES[root] + suffix,
         root,
+        minor: shape[1] === 3,
         tones,
         norm: Math.sqrt(tones.length),
         inKey: !useKey || allowed.has(`${(root - key.tonic + 12) % 12}${shape[1] === 3 ? "m" : "M"}`),
@@ -872,9 +968,9 @@ function chordsFromAudio(chroma, winSec) {
   };
   const emit = (w, st) => {
     let score = cosine(w, st);
-    if (st.root === argmax(w.b)) score += 0.06; // the lowest notes agree on the root
-    if (!st.inKey) score -= 0.1;
-    if (st.extra) score -= 0.06;
+    if (st.root === argmax(w.b)) score += 0.15; // the lowest notes agree on the root
+    if (!st.inKey) score -= 0.02; // only a tie-breaker: a wrong guess at the key must not override what is heard
+    if (st.extra) score -= 0.09;
     return score;
   };
 
@@ -884,27 +980,57 @@ function chordsFromAudio(chroma, winSec) {
   // pick the best path through time, so one odd window doesn't flip the chord
   const T = active.length;
   const S = states.length;
-  const back = Array.from({ length: T }, () => new Int16Array(S));
-  let prev = Float64Array.from(states, (st) => emit(active[0], st));
-  for (let t = 1; t < T; t++) {
-    let bestPrev = 0;
-    for (let s = 1; s < S; s++) if (prev[s] > prev[bestPrev]) bestPrev = s;
-    const cur = new Float64Array(S);
-    for (let s = 0; s < S; s++) {
-      const stay = prev[s];
-      const jump = prev[bestPrev] - CHANGE_COST;
-      const from = stay >= jump ? s : bestPrev;
-      cur[s] = Math.max(stay, jump) + emit(active[t], states[s]);
-      back[t][s] = from;
+  const barAligned = Number($("bpm").value) > 0; // loop voting needs evenly spaced windows lined up with the bars
+  const bars = barAligned && grid.length ? grid[0].len : 0;
+  const E = repeatVote(active, active.map((w) => Float64Array.from(states, (st) => emit(w, st))), bars);
+  const findPath = (E) => {
+    const back = Array.from({ length: T }, () => new Int16Array(S));
+    let prev = Float64Array.from(E[0]);
+    for (let t = 1; t < T; t++) {
+      let bestPrev = 0;
+      for (let s = 1; s < S; s++) if (prev[s] > prev[bestPrev]) bestPrev = s;
+      const cur = new Float64Array(S);
+      for (let s = 0; s < S; s++) {
+        const stay = prev[s];
+        const jump = prev[bestPrev] - CHANGE_COST;
+        const from = stay >= jump ? s : bestPrev;
+        cur[s] = Math.max(stay, jump) + E[t][s];
+        back[t][s] = from;
+      }
+      prev = cur;
     }
-    prev = cur;
-  }
-  let s = 0;
-  for (let i = 1; i < S; i++) if (prev[i] > prev[s]) s = i;
-  const path = new Array(T);
-  for (let t = T - 1; t >= 0; t--) {
-    path[t] = s;
-    s = back[t][s];
+    let s = 0;
+    for (let i = 1; i < S; i++) if (prev[i] > prev[s]) s = i;
+    const path = new Array(T);
+    for (let t = T - 1; t >= 0; t--) {
+      path[t] = s;
+      s = back[t][s];
+    }
+    return path;
+  };
+  let path = findPath(E);
+
+  // Second pass: within one song a chord usually keeps its quality (an F is not major in one bar and
+  // minor in the next). Where the first pass leans clearly one way for a root, nudge the close calls
+  // for that root the same way.
+  if (QUALITY_PRIOR > 0) {
+    const tally = new Map();
+    for (const st of path) {
+      const { root, minor } = states[st];
+      const row = tally.get(root) || [0, 0];
+      row[minor ? 1 : 0]++;
+      tally.set(root, row);
+    }
+    const E2 = E.map((row) => Float64Array.from(row));
+    for (let t = 0; t < T; t++) {
+      for (let k = 0; k < S; k++) {
+        const row = tally.get(states[k].root);
+        if (!row || row[0] + row[1] < 4) continue;
+        const shareMinor = row[1] / (row[0] + row[1]);
+        E2[t][k] += QUALITY_PRIOR * ((states[k].minor ? shareMinor : 1 - shareMinor) - 0.5);
+      }
+    }
+    path = findPath(E2);
   }
 
   const chords = [];
@@ -1135,9 +1261,9 @@ function scheduleRender(delay = 60, busy = false) {
   }, delay);
 }
 
-for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange", "sevenths", "inKey", "part", "chordMethod", "bpm", "bpmStep", "barStart"]) {
+for (const id of ["instrument", "mode", "sens", "win", "minLen", "merge", "useRange", "sevenths", "inKey", "part", "chordMethod", "bpm", "bpmStep", "barStart", "beats"]) {
   // sensitivity re-detects every note and the tempo search is also slow, so wait until typing or sliding stops
-  const slow = id === "sens" || id === "bpm" || id === "barStart";
+  const slow = id === "sens" || id === "bpm" || id === "barStart" || id === "beats";
   $(id).addEventListener("input", () => scheduleRender(slow ? 350 : 60, slow));
 }
 
